@@ -1,0 +1,78 @@
+# Listing of Example Sneddon 2d constant pressure test
+# ----------------------------------------------------
+
+subsection Optimal parameters
+  set length 1  =  1000.
+  set length 2  =  1000.
+end
+
+
+subsection Global parameters
+  set darcy switch                      = true
+  set Global pre-refinement steps	= 4
+  set Local pre-refinement steps  	= 3
+  set Adaptive refinement cycles        = 0
+  set Max No of timesteps  	  	= 1000
+  set Timestep size			= 0.01
+  set Timestep size to switch to = 1.0
+  set Switch timestep after steps = 0
+
+  set outer solver                      = active set
+  set test case                         = multiple homo 3d
+  set ref strategy                      = phase field
+ 
+  set value phase field for refinement  = 0.6
+
+  # Add here to read-in the grid
+ set Output filename	    	       = 3D_single
+end
+
+subsection Problem dependent parameters
+  set K reg				= 1e-10*h
+  set Eps reg				= 2.*h
+  # must be 0.0 in active set
+  set Gamma penalization		= 0.
+
+  # Material and problem-rhs parameters
+  set use peaceman well model		= false
+  set Pressure				= 0.
+  set Fracture toughness G_c		= 1.0
+  set Density solid	 		= 1.0
+  set Poisson ratio nu			= 0.2
+  set E modulus	    			= 1e8
+  set alpha time                        = 0.0
+
+  set pressure diff x1                  = 0.
+  set pressure diff x2                  = 1.
+
+  #alpha_biot = 1: 7.5e-5
+  #alpha_biot = 0: 1.0e-11
+  set pressure wellbore                 = 500.
+  set alpha Biot coefficient		= 1.0
+  set M Biot   				= 1.0e+8
+  set Compressibility Fracture		= 1.0e-8
+
+  set Viscosity Reservoir		= 1.e-3
+  set Viscosity Fracture		= 1.e-3
+
+  set Permeability Reservoir		= 1.0e-12
+  set Density Reservoir			= 1.0
+
+  # 1e-1 seems low but corresponds to the relative
+  #  tolerance
+  set tol fixed stress                  = 1.0e-2
+  set tol fixed stress two              = 1.0e-2
+
+end 
+
+subsection Solver parameters
+  set Use Direct Inner Solver		   = false
+  set Newton lower bound     		   = 1.0e-8
+  set Newton lower bound pressure	   = 1.0e-16
+  set Newton maximum steps		   = 50
+  set Upper Newton rho			   = 0.999
+  set Line search maximum steps            = 10
+  set Line search damping 		   = 0.5
+  set Decompose stress in rhs		   = 0.0
+  set Decompose stress in matrix	   = 0.0
+end

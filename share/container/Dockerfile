@@ -135,6 +135,7 @@ RUN cd dealii-*/ && mkdir build && cd build && \
           -DWITH_TRILINOS=ON \
           -DWITH_ZLIB=ON \
           -DP4EST_DIR="/opt/p4est" \
+          -DCMAKE_INSTALL_PREFIX="/opt/dealii" \
     .. && \
     make -j10 && make install
 

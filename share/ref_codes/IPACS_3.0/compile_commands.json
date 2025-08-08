@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/Users/lee/Codes/Ver3.0_IPACS",
+  "command": "/usr/bin/clang++ -DDEBUG -Ddeal_II_dimension=2 -isystem /Users/lee/Utils/dealII_9.5.1/include -isystem /Users/lee/Utils/dealII_9.5.1/include/deal.II/bundled -isystem /opt/homebrew/Cellar/open-mpi/5.0.7/include -isystem /opt/homebrew/opt/boost/include -isystem /Users/lee/Utils/Trilinos_14.0.0/include -isystem /Users/lee/Utils/p4est-2.8.7/FAST/include -std=gnu++17 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.2.sdk -pedantic -Wall -Wextra -Wmissing-braces -Woverloaded-virtual -Wpointer-arith -Wsign-compare -Wsuggest-override -Wswitch -Wsynth -Wwrite-strings -Wno-deprecated-declarations -Wno-psabi -Wfloat-conversion -Qunused-arguments -Wno-unsupported-friend -Wno-pass-failed -Wno-parentheses -Wno-unused-local-typedefs -openmp-simd -ftemplate-depth=1024 -ffp-exception-behavior=strict -Og -ggdb -Wa,--compress-debug-sections -o CMakeFiles/IPACS-V3.0.dir/IPACS-V3.0.cc.o -c /Users/lee/Codes/Ver3.0_IPACS/IPACS-V3.0.cc",
+  "file": "/Users/lee/Codes/Ver3.0_IPACS/IPACS-V3.0.cc",
+  "output": "CMakeFiles/IPACS-V3.0.dir/IPACS-V3.0.cc.o"
+}
+]

@@ -1,0 +1,14 @@
+Wed Jun 28 18:16:49 CDT 2017: START  job=451622 pwd=/home/jammoul/IPARS/IPARSv3.1/workt/test1 system=bevo3 cores=8
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+./ipars: error while loading shared libraries: /opt/apps/sysnet/intel/16/mkl/lib/intel64/libmkl_intel_lp64.so: cannot open shared object file: No such file or directory
+Wed Jun 28 18:16:49 CDT 2017: FINISH job=451622 pwd=/home/jammoul/IPARS/IPARSv3.1/workt/test1 system=bevo3 cores=8 elapsed=0d00h00m status=127

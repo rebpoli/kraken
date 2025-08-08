@@ -1,0 +1,1729 @@
+!----------------------------------------------------------------------
+! visual9.df - modern tecplot output for bricks and hexahedral grids,
+!              no cumbersome postprocessing required, supports binary.
+! Author: Ben Ganis
+! bganis@ices.utexas.edu
+! 6/21/16
+!----------------------------------------------------------------------
+
+      MODULE tecbinmod
+      IMPLICIT NONE
+      SAVE
+
+      LOGICAL :: TECBIN
+      LOGICAL :: TECDBG = .FALSE.
+      INTEGER :: TECUNIT = 20
+      INTEGER*4, ALLOCATABLE :: PASSIVEVARLIST(:),VALUELOCATION(:),
+     &                          SHAREVARFROMZONE(:)
+      REAL*8 :: VTIM
+      INTEGER :: CNEWT = 1
+      REAL*8 :: LAST_TIME = -9.91573D30
+
+      TYPE tecbinblk
+        INTEGER :: NUMELE,NUMNOD,MAXNUM
+        INTEGER, ALLOCATABLE :: NODNUM(:,:,:),NOD2IJK(:,:)
+        DOUBLE PRECISION, ALLOCATABLE :: ARR(:)
+        INTEGER*4, ALLOCATABLE :: CONNECT(:,:)
+      END TYPE
+
+      TYPE (tecbinblk), ALLOCATABLE :: TECBLK(:)
+
+      INTEGER :: GNUMNODES = 0
+      INTEGER :: GNUMELES = 0
+      INTEGER :: GNUMFACES = 0
+      INTEGER :: GNUMFACENODES = 0
+      INTEGER :: LNUMELES = 0
+      INTEGER :: LNUMFACES = 0
+      INTEGER :: LNUMFACENODES = 0
+      INTEGER :: MAXELEONBLK = 0
+      INTEGER :: MAXFACES = 0
+      INTEGER :: MAXFACENODES = 0
+      INTEGER :: MSGSIZE = 0
+      INTEGER :: IFACE = 0
+      INTEGER :: INODE = 0
+      INTEGER :: IBLK = 0
+      INTEGER :: IPRC = 0
+      INTEGER :: IBUF(2) = [0,0]
+ 
+      INTEGER, ALLOCATABLE :: NODPERFACE(:)
+      INTEGER, ALLOCATABLE :: FACENODES(:)
+      INTEGER, ALLOCATABLE :: LEFTRIGHT(:,:)
+      REAL*8, ALLOCATABLE :: BUF(:)
+      REAL*8, ALLOCATABLE :: NODBUF(:)
+
+      END MODULE
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_GRID1(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,XC,YC,ZC,NVARS)
+!----------------------------------------------------------------------
+! Opens the visual output file and
+! writes file header, zone headers, and coordinates.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'layout.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK,NVARS
+      REAL*8  XC(IDIM+1,JDIM+1,KDIM+1),YC(IDIM+1,JDIM+1,KDIM+1),
+     &        ZC(IDIM+1,JDIM+1,KDIM+1)
+!----------------------------------------------------------------------
+      CHARACTER*$MXBNAM BLOCKNAME
+      CHARACTER TECNAME*(3*$MXVFNAM)
+      INTEGER IOFF,JOFF,KOFF
+      INTEGER IERR,LT,LT2,I,J,K,L,II,JJ,KK,N,CTR
+      INTEGER, SAVE :: FIRSTBLK=0,ZNUM=0
+      LOGICAL HASCC
+
+      INTEGER*4 :: FILETYPE=0,DEBUG=0,ISDOUBLE=1,ZONETYPE=5,ISBLOCK=1
+      CHARACTER*256 :: TITLE,SCRATCHDIR,ZONETITLE
+      CHARACTER*2048 :: VARIABLES
+      INTEGER*4 :: SHARECONNECTIVITY
+$TECBIN      INTEGER*4 TECINI112,TECZNE112,TECDAT112
+
+! Offset for cell center to 8 hex vertices
+      INTEGER OFFSET1(3,8)
+      DATA OFFSET1/0,0,0, 1,0,0, 1,1,0, 0,1,0,
+     &             0,0,1, 1,0,1, 1,1,1, 0,1,1/
+!----------------------------------------------------------------------
+
+! Handle binary input flag
+      TECBIN = VIS_BINARY
+$TECBIN      IF (.FALSE.) THEN
+          IF (TECBIN.AND.(MYPRC.EQ.0))
+     &      WRITE(*,*)'VIS_BINARY = TRUE was ignored.'
+          TECBIN = .FALSE.
+!          STOP 'Need to compile with vistecbin.mak, '//
+!     &       'or set VIS_BINARY = FALSE.'
+$TECBIN      ENDIF
+
+      CALL BLKOFF(NBLK,IOFF,JOFF,KOFF,IERR)
+
+! Keep track of local zone number
+      IF (FIRSTBLK.EQ.0) FIRSTBLK=NBLK
+      IF (NBLK.EQ.FIRSTBLK) THEN
+        ZNUM=0
+        IF ((TECEXISTS).AND.(.NOT.ADAPTIVITY)) ALLZONES=.TRUE.
+      ENDIF
+      ZNUM=ZNUM+1
+
+! Keep track of cumulative newton counter
+      IF (TIM.EQ.LAST_TIME) THEN
+        IF (NBLK.EQ.FIRSTBLK) THEN
+          CNEWT=CNEWT+1
+        ENDIF
+      ELSE
+        IF (LAST_TIME.GT.0) CNEWT = 0
+        LAST_TIME = TIM
+      ENDIF
+
+      IF (TECDBG) THEN
+        WRITE(*,*)'In VIS_TEC_GRID1, NBLK=',NBLK
+        WRITE(*,*)'TECBIN = ',TECBIN
+        WRITE(*,*)'TECEXISTS = ',TECEXISTS
+        WRITE(*,*)'ALLZONES = ',ALLZONES
+        WRITE(*,*)'FIRSTBLK = ',FIRSTBLK
+        WRITE(*,*)'ZNUM = ',ZNUM
+      ENDIF
+
+! Form visual time
+      IF (VISNEWT) THEN
+        VTIM = TIM + 1.E-4*CNEWT
+        IF ((MYPRC.EQ.0).AND.(NBLK.EQ.FIRSTBLK))
+     &    WRITE(*,'(A,1P,E11.4)')'VISUAL9: VTIM=',VTIM
+      ELSE
+        VTIM = TIM
+      ENDIF
+
+! Count number of elements and nodes, since they aren't saved
+! as IPARS grid element arrays (not too expensive...)
+      IF (.NOT.ALLOCATED(TECBLK)) THEN
+        ALLOCATE(TECBLK(NUMBLK),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate TECBLK'
+      ENDIF
+
+      IF (.NOT.ALLOCATED(TECBLK(NBLK)%NODNUM)) THEN
+        ALLOCATE(TECBLK(NBLK)%NODNUM(IDIM+1,JDIM+1,KDIM+1),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate NODNUM'
+        TECBLK(NBLK)%NODNUM=0
+        ALLOCATE(TECBLK(NBLK)%NOD2IJK((IDIM+1)*(JDIM+1)*(KDIM+1),3),
+     &    STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate NOD2IJK'
+        TECBLK(NBLK)%NOD2IJK=0
+        TECBLK(NBLK)%NUMELE=0
+        TECBLK(NBLK)%NUMNOD=0
+        DO K = KL1,KL2
+        DO J = JL1V(K),JL2V(K)
+        DO I = IL1,IL2
+        IF (KEYOUT(I,J,K).EQ.1) THEN
+        TECBLK(NBLK)%NUMELE=TECBLK(NBLK)%NUMELE+1
+        DO L=1,8
+          II = I + OFFSET1(1,L)
+          JJ = J + OFFSET1(2,L)
+          KK = K + OFFSET1(3,L)
+          IF (TECBLK(NBLK)%NODNUM(II,JJ,KK).EQ.0) THEN
+            TECBLK(NBLK)%NUMNOD=TECBLK(NBLK)%NUMNOD+1
+            TECBLK(NBLK)%NODNUM(II,JJ,KK)=TECBLK(NBLK)%NUMNOD
+            TECBLK(NBLK)%NOD2IJK(TECBLK(NBLK)%NUMNOD,1:3)=[II,JJ,KK]
+          ENDIF
+        ENDDO
+        ENDIF
+        ENDDO
+        ENDDO
+        ENDDO
+
+        TECBLK(NBLK)%MAXNUM=MAX(TECBLK(NBLK)%NUMNOD,TECBLK(NBLK)%NUMELE)
+        ALLOCATE(TECBLK(NBLK)%ARR(TECBLK(NBLK)%MAXNUM),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate ARR'
+
+        IF (TECDBG) THEN
+          WRITE(*,*)'NBLK=',NBLK
+          WRITE(*,*)'NUMNOD=',TECBLK(NBLK)%NUMNOD
+          WRITE(*,*)'NUMELE=',TECBLK(NBLK)%NUMELE
+        ENDIF
+      ENDIF
+
+! Skip output if empty fault block
+      IF (TECBLK(NBLK)%NUMNOD.EQ.0.OR.TECBLK(NBLK)%NUMELE.EQ.0) THEN
+        IF (TECDBG) THEN
+          WRITE(*,*)'Empty Zone, MYPRC,NBLK=',MYPRC,NBLK
+        ENDIF
+        RETURN
+      ENDIF
+
+! Arrays for binary output
+      IF (TECBIN.AND..NOT.ALLOCATED(PASSIVEVARLIST)) THEN
+        ALLOCATE(PASSIVEVARLIST(3+NVARS),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate PASSIVEVARLIST'
+        ALLOCATE(VALUELOCATION(3+NVARS),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate VALUELOCATION'
+        ALLOCATE(SHAREVARFROMZONE(3+NVARS),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate SHAREVARFROMZONE'
+      ENDIF
+
+! Form TECNAME
+        LT = len_trim(VIS_DIR)
+        IF ((LT.LE.1).OR.(LT.GE.50)) THEN
+          LT = len_trim(VIS_FNAME)
+          WRITE(TECNAME,'(2A,I4.4,A)')
+     &      TRIM(VIS_FNAME(1:LT-1)),
+     &      '_p',MYPRC,'.plt'
+        ELSE
+          LT = len_trim(VIS_FNAME)
+          LT2 = len_trim(VIS_DIR)
+          WRITE(TECNAME,'(4A,I4.4,A)')
+     &      TRIM(VIS_DIR(1:LT2-1)),'/',TRIM(VIS_FNAME(1:LT-1)),
+     &      '_p',MYPRC,'.plt'
+        ENDIF
+        IF (TECDBG) WRITE(*,*)'TECNAME = ',TRIM(TECNAME)
+
+! If writing to visual output for the first time, create new file
+      IF (.NOT.TECEXISTS) THEN
+        VARIABLES = 'X,Y,Z'
+        DO I=1,NVARS
+          VARIABLES = TRIM(VARIABLES) // ',' //
+     &                TRIM(VIS_VARNAMES(I))
+        ENDDO
+        IF (TECDBG) WRITE(*,*)'VARIABLES=',TRIM(VARIABLES)
+
+        IF (.NOT.TECBIN) THEN
+          OPEN(TECUNIT,file=TRIM(TECNAME),STATUS='unknown')
+          WRITE(TECUNIT,'(3A)')'TITLE = "',TRIM(DATTL(1)),'"'
+          WRITE(TECUNIT,'(A,$)')'VARIABLES = ',TRIM(VARIABLES)
+          WRITE(TECUNIT,*)
+        ELSE
+          SCRATCHDIR = '/tmp' // CHAR(0)
+          VARIABLES = TRIM(VARIABLES) // CHAR(0)
+          TECNAME = TRIM(TECNAME) // CHAR(0)
+$TECBIN          IERR = TECINI112(TRIM(DATTL(1)),TRIM(VARIABLES),
+$TECBIN     &      TRIM(TECNAME),TRIM(SCRATCHDIR),FILETYPE,DEBUG,
+$TECBIN     &      ISDOUBLE)
+          IF (TECDBG) WRITE(*,*)'After TECINI, IERR=',IERR
+          IF (IERR.NE.0) STOP 'Error with TECINI112'
+        ENDIF
+! Else if writing to visual output on subsequent time, append
+      ELSE
+        IF (.NOT.TECBIN)
+     &    OPEN(TECUNIT,file=TRIM(TECNAME),STATUS='old',ACCESS='append')
+      ENDIF
+
+      CALL BLKNAME(NBLK,BLOCKNAME,IERR)
+      HASCC=.FALSE.
+      DO I=1,NVARS
+        IF (VIS_VAL_NODAL(I).EQ.0) THEN
+          HASCC=.TRUE.
+          EXIT
+        ENDIF
+      ENDDO
+
+      IF (.NOT.TECBIN) THEN
+        WRITE(TECUNIT,*)
+        WRITE(TECUNIT,'(3A)')'ZONE T="',TRIM(BLOCKNAME),'"'
+        WRITE(TECUNIT,'(1P,A,E15.6)')'SOLUTIONTIME=',VTIM
+        WRITE(TECUNIT,'(A,I)')'STRANDID=',NBLK
+        WRITE(TECUNIT,'(A)')'ZONETYPE=FEBRICK'
+        WRITE(TECUNIT,'(A)')'DATAPACKING=BLOCK'
+        WRITE(TECUNIT,'(A,I)')'NODES=',TECBLK(NBLK)%NUMNOD
+        WRITE(TECUNIT,'(A,I)')'ELEMENTS=',TECBLK(NBLK)%NUMELE
+        IF (HASCC) THEN
+          WRITE(TECUNIT,'(A,$)')'VARLOCATION=(['
+          CTR=0
+          DO I=1,NVARS
+            IF (VIS_VAL_NODAL(I).EQ.0) THEN
+              IF (CTR.NE.0) WRITE(TECUNIT,'(A,$)')','
+              IF (3+I.LT.10) THEN
+                WRITE(TECUNIT,'(I1,$)')3+I
+              ELSEIF (3+I.LT.100) THEN
+                WRITE(TECUNIT,'(I2,$)')3+I
+              ELSE
+                WRITE(TECUNIT,'(I3,$)')3+I
+              ENDIF
+              CTR=CTR+1
+            ENDIF
+          ENDDO
+          WRITE(TECUNIT,'(A)')']=CELLCENTERED)'
+        ENDIF
+        IF (ALLZONES) THEN
+          WRITE(TECUNIT,'(A,I)')'CONNECTIVITYSHAREZONE=',ZNUM
+          WRITE(TECUNIT,'(A,I,A)')'VARSHARELIST=([1-3]=',ZNUM,')'
+        ENDIF
+      ELSE
+        VALUELOCATION = 1
+        IF (HASCC) THEN
+          DO I=1,NVARS
+            IF (VIS_VAL_NODAL(I).EQ.0) VALUELOCATION(3+I)=0
+          ENDDO
+        ENDIF
+        PASSIVEVARLIST = 0
+        SHARECONNECTIVITY = 0
+        SHAREVARFROMZONE = 0
+        IF (ALLZONES) THEN
+          SHARECONNECTIVITY = ZNUM
+          SHAREVARFROMZONE(1:3) = ZNUM
+        ENDIF
+        IF (TECDBG) THEN
+          WRITE(*,*)'BLOCKNAME=',TRIM(BLOCKNAME)
+          WRITE(*,*)'ZONETYPE=',ZONETYPE
+          WRITE(*,*)'NUMNOD=',TECBLK(NBLK)%NUMNOD
+          WRITE(*,*)'NUMELE=',TECBLK(NBLK)%NUMELE
+          WRITE(*,*)'TIM=',VTIM
+          WRITE(*,*)'NBLK=',NBLK
+          WRITE(*,*)'ISBLOCK=',ISBLOCK
+          WRITE(*,*)'PASSIVEVARLIST=',PASSIVEVARLIST
+          WRITE(*,*)'VALUELOCATION=',VALUELOCATION
+          WRITE(*,*)'SHAREVARFROMZONE=',SHAREVARFROMZONE
+          WRITE(*,*)'SHARECONNECTIVITY=',SHARECONNECTIVITY
+        ENDIF
+$TECBIN        IERR = TECZNE112(TRIM(BLOCKNAME),ZONETYPE,
+$TECBIN     &           TECBLK(NBLK)%NUMNOD,TECBLK(NBLK)%NUMELE,
+$TECBIN     &           0,0,0,0,VTIM,NBLK,0,ISBLOCK,0,0,0,0,0,
+$TECBIN     &           PASSIVEVARLIST,VALUELOCATION,SHAREVARFROMZONE,
+$TECBIN     &           SHARECONNECTIVITY)
+        IF (TECDBG) WRITE(*,*)'After TECZNE, IERR=',IERR
+        IF (IERR.NE.0) STOP 'Error with TECZNE112'
+      ENDIF
+
+! Output coordinates if first zone
+      IF (.NOT.ALLZONES) THEN
+        DO I=1,TECBLK(NBLK)%NUMNOD
+          II=TECBLK(NBLK)%NOD2IJK(I,1)
+          JJ=TECBLK(NBLK)%NOD2IJK(I,2)
+          KK=TECBLK(NBLK)%NOD2IJK(I,3)
+          IF (KNDGRD.EQ.1) THEN
+            TECBLK(NBLK)%ARR(I)=XREC(II+IOFF,NBLK)
+          ELSE
+            TECBLK(NBLK)%ARR(I)=XC(II,JJ,KK)
+          ENDIF
+        ENDDO
+        IF (TECDBG) WRITE(*,*)'# X'
+        IF (.NOT.TECBIN) THEN
+          WRITE(TECUNIT,'(A)')'# X'
+          WRITE(TECUNIT,'(1P,4E15.6)')
+     &      TECBLK(NBLK)%ARR(1:TECBLK(NBLK)%NUMNOD)
+        ELSE
+$TECBIN          IERR = TECDAT112(TECBLK(NBLK)%NUMNOD,
+$TECBIN     &             TECBLK(NBLK)%ARR,ISDOUBLE)
+          IF (IERR.NE.0) STOP 'Error with TECDAT112'
+        ENDIF
+
+        DO I=1,TECBLK(NBLK)%NUMNOD
+          II=TECBLK(NBLK)%NOD2IJK(I,1)
+          JJ=TECBLK(NBLK)%NOD2IJK(I,2)
+          KK=TECBLK(NBLK)%NOD2IJK(I,3)
+          IF (KNDGRD.EQ.1) THEN
+            TECBLK(NBLK)%ARR(I)=YREC(JJ+JOFF,NBLK)
+          ELSE
+            TECBLK(NBLK)%ARR(I)=YC(II,JJ,KK)
+          ENDIF
+        ENDDO
+        IF (TECDBG) WRITE(*,*)'# Y'
+        IF (.NOT.TECBIN) THEN
+          WRITE(TECUNIT,'(A)')'# Y'
+          WRITE(TECUNIT,'(1P,4E15.6)')
+     &      TECBLK(NBLK)%ARR(1:TECBLK(NBLK)%NUMNOD)
+        ELSE
+$TECBIN          IERR = TECDAT112(TECBLK(NBLK)%NUMNOD,
+$TECBIN     &             TECBLK(NBLK)%ARR,ISDOUBLE)
+          IF (IERR.NE.0) STOP 'Error with TECDAT112'
+        ENDIF
+
+        DO I=1,TECBLK(NBLK)%NUMNOD
+          II=TECBLK(NBLK)%NOD2IJK(I,1)
+          JJ=TECBLK(NBLK)%NOD2IJK(I,2)
+          KK=TECBLK(NBLK)%NOD2IJK(I,3)
+          IF (KNDGRD.EQ.1) THEN
+            TECBLK(NBLK)%ARR(I)=ZREC(KK+KOFF,NBLK)
+          ELSE
+            TECBLK(NBLK)%ARR(I)=ZC(II,JJ,KK)
+          ENDIF
+        ENDDO
+        IF (TECDBG) WRITE(*,*)'# Z'
+        IF (.NOT.TECBIN) THEN
+          WRITE(TECUNIT,'(A)')'# Z'
+          WRITE(TECUNIT,'(1P,4E15.6)')
+     &      TECBLK(NBLK)%ARR(1:TECBLK(NBLK)%NUMNOD)
+        ELSE
+$TECBIN          IERR = TECDAT112(TECBLK(NBLK)%NUMNOD,
+$TECBIN     &             TECBLK(NBLK)%ARR,ISDOUBLE)
+          IF (IERR.NE.0) STOP 'Error with TECDAT112'
+        ENDIF
+      ENDIF
+
+      END
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_ARRAY(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,IVAR,VAR)
+!----------------------------------------------------------------------
+! Writes one nodal or cell-centered variable in block format.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK,IVAR,IOFF
+      REAL*8  VAR(IDIM,JDIM,KDIM,*)
+      INTEGER I,J,K,L,CTR,II,JJ,KK,IERR,NTYPGA,ND4GA,KARR
+
+! Skip output if empty fault block
+      IF (TECBLK(NBLK)%NUMNOD.EQ.0.OR.TECBLK(NBLK)%NUMELE.EQ.0) THEN
+        IF (TECDBG) WRITE(*,*)'Empty Zone, MYPRC,NBLK=',MYPRC,NBLK
+        RETURN
+      ENDIF
+
+      CALL ARYDAT(VIS_VARNAMES(IVAR),NTYPGA,ND4GA,KARR,IERR)
+      IOFF=VIS_OFFSETS(IVAR)
+      IF ((NTYPGA.EQ.1).OR.(NTYPGA.EQ.2)) THEN
+        CALL VIS_TEC_ARRAY48(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,IVAR,VAR,VAR,IOFF,NTYPGA)
+      ELSE
+        CALL KILL_IPARS('Unknown variable type in VIS_TEC_ARRAY')
+      ENDIF
+
+      END
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_ARRAY48(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,IVAR,VAR4,VAR8,IOFF,NTYPGA)
+!----------------------------------------------------------------------
+! Writes one nodal or cell-centered variable in block format.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK,IVAR,IOFF,NTYPGA
+      REAL*4  VAR4(IDIM,JDIM,KDIM,*)
+      REAL*8  VAR8(IDIM,JDIM,KDIM,*)
+      INTEGER I,J,K,L,CTR,II,JJ,KK,IERR
+
+      INTEGER*4 :: ISDOUBLE=1
+$TECBIN      INTEGER*4 TECDAT112
+
+! Offset for cell center to 8 hex vertices
+      INTEGER OFFSET1(3,8)
+      DATA OFFSET1/0,0,0, 1,0,0, 1,1,0, 0,1,0,
+     &             0,0,1, 1,0,1, 1,1,1, 0,1,1/
+!----------------------------------------------------------------------
+
+      IF (VIS_VAL_NODAL(IVAR).EQ.0) THEN
+        CTR=0
+        IF (NTYPGA.EQ.2) THEN
+          DO K = KL1,KL2
+          DO J = JL1V(K),JL2V(K)
+          DO I = IL1,IL2
+          IF (KEYOUT(I,J,K).EQ.1) THEN
+            CTR=CTR+1
+            TECBLK(NBLK)%ARR(CTR)=VAR8(I,J,K,IOFF)
+          ENDIF
+          ENDDO
+          ENDDO
+          ENDDO
+        ELSE
+          DO K = KL1,KL2
+          DO J = JL1V(K),JL2V(K)
+          DO I = IL1,IL2
+          IF (KEYOUT(I,J,K).EQ.1) THEN
+            CTR=CTR+1
+            TECBLK(NBLK)%ARR(CTR)=DBLE(VAR4(I,J,K,IOFF))
+          ENDIF
+          ENDDO
+          ENDDO
+          ENDDO
+        ENDIF
+        IF (TECDBG) WRITE(*,*)'# ',TRIM(VIS_VARNAMES(IVAR))
+        IF (.NOT.TECBIN) THEN
+          WRITE(TECUNIT,'(2A)')'# ',TRIM(VIS_VARNAMES(IVAR))
+          WRITE(TECUNIT,'(1P,4E15.6)')
+     &      TECBLK(NBLK)%ARR(1:TECBLK(NBLK)%NUMELE)
+        ELSE
+$TECBIN          IERR = TECDAT112(TECBLK(NBLK)%NUMELE,
+$TECBIN     &             TECBLK(NBLK)%ARR,ISDOUBLE)
+          IF (IERR.NE.0) STOP 'Error with TECDAT112'
+        ENDIF
+      ELSE
+        IF (NTYPGA.EQ.2) THEN
+          DO I = 1,TECBLK(NBLK)%NUMNOD
+            II = TECBLK(NBLK)%NOD2IJK(I,1)
+            JJ = TECBLK(NBLK)%NOD2IJK(I,2)
+            KK = TECBLK(NBLK)%NOD2IJK(I,3)
+            TECBLK(NBLK)%ARR(I)=VAR8(II,JJ,KK,IOFF)
+          ENDDO
+        ELSE
+          DO I = 1,TECBLK(NBLK)%NUMNOD
+            II = TECBLK(NBLK)%NOD2IJK(I,1)
+            JJ = TECBLK(NBLK)%NOD2IJK(I,2)
+            KK = TECBLK(NBLK)%NOD2IJK(I,3)
+            TECBLK(NBLK)%ARR(I)=DBLE(VAR4(II,JJ,KK,IOFF))
+          ENDDO
+        ENDIF
+        IF (TECDBG) WRITE(*,*)'# ',TRIM(VIS_VARNAMES(IVAR))
+        IF (.NOT.TECBIN) THEN
+          WRITE(TECUNIT,'(2A)')'# ',TRIM(VIS_VARNAMES(IVAR))
+          WRITE(TECUNIT,'(1P,4E15.6)')
+     &      TECBLK(NBLK)%ARR(1:TECBLK(NBLK)%NUMNOD)
+        ELSE
+$TECBIN          IERR = TECDAT112(TECBLK(NBLK)%NUMNOD,
+$TECBIN     &             TECBLK(NBLK)%ARR,ISDOUBLE)
+          IF (IERR.NE.0) STOP 'Error with TECDAT112'
+        ENDIF
+      ENDIF
+
+      END
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_GRID2(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK)
+!----------------------------------------------------------------------
+! Writes zone connectivity information.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK
+!----------------------------------------------------------------------
+      INTEGER IERR,I,J,K,L,II,JJ,KK,CTR
+
+      INTEGER*4 :: ISDOUBLE=1
+$TECBIN      INTEGER*4 TECNOD112
+
+! Offset for cell center to 8 hex vertices
+      INTEGER OFFSET1(3,8)
+      DATA OFFSET1/0,0,0, 1,0,0, 1,1,0, 0,1,0,
+     &             0,0,1, 1,0,1, 1,1,1, 0,1,1/
+!----------------------------------------------------------------------
+
+      IF (TECDBG) WRITE(*,*)'In VIS_TEC_GRID2'
+
+! Skip output if empty fault block
+      IF (TECBLK(NBLK)%NUMNOD.EQ.0.OR.TECBLK(NBLK)%NUMELE.EQ.0) THEN
+        IF (TECDBG) WRITE(*,*)'Empty Zone, MYPRC,NBLK=',MYPRC,NBLK
+        RETURN
+      ENDIF
+
+      IF (.NOT.ALLZONES) THEN
+
+! Always count number of elements and nodes, since they aren't saved
+! as IPARS grid element arrays (not too expensive...)
+        ALLOCATE(TECBLK(NBLK)%CONNECT(8,TECBLK(NBLK)%NUMELE),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate CONNECT'
+
+        CTR=0
+        DO K = KL1,KL2
+        DO J = JL1V(K),JL2V(K)
+        DO I = IL1,IL2
+        IF (KEYOUT(I,J,K).EQ.1) THEN
+          CTR=CTR+1
+          DO L=1,8
+            II = I + OFFSET1(1,L)
+            JJ = J + OFFSET1(2,L)
+            KK = K + OFFSET1(3,L)
+            TECBLK(NBLK)%CONNECT(L,CTR)=TECBLK(NBLK)%NODNUM(II,JJ,KK)
+          ENDDO
+        ENDIF
+        ENDDO
+        ENDDO
+        ENDDO
+
+        IF (TECDBG) WRITE(*,*)'# connectivity'
+        IF (.NOT.TECBIN) THEN
+          WRITE(TECUNIT,'(A)')'# connectivity'
+          WRITE(TECUNIT,'(8I)') TECBLK(NBLK)%CONNECT
+        ELSE
+$TECBIN          IERR = TECNOD112(TECBLK(NBLK)%CONNECT)
+          IF (IERR.NE.0) STOP 'Error with TECNOD112'
+        ENDIF
+
+      ENDIF
+
+      IF (.NOT.TECBIN) CLOSE(TECUNIT)
+      IF (.NOT.TECEXISTS) TECEXISTS = .TRUE.
+
+      END
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_DEALLOC()
+!----------------------------------------------------------------------
+! Deallocates dynamic tecplot memory.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INTEGER N,IERR
+      INCLUDE 'control.h'
+      INCLUDE 'layout.h'
+      INCLUDE 'visual.h'
+
+      IF ((VISFLAG.NE.9).AND.(VISFLAG.NE.10)) RETURN
+
+      IF (TECDBG) WRITE(*,*)'In VIS_TEC_DEALLOC, myprc=',myprc
+      IF (TECEXISTS) THEN
+        IF (ALLOCATED(TECBLK)) THEN
+          DO N=1,NUMBLK
+            IF (ALLOCATED(TECBLK(N)%NODNUM))
+     &        DEALLOCATE(TECBLK(N)%NODNUM)
+            IF (ALLOCATED(TECBLK(N)%NOD2IJK))
+     &        DEALLOCATE(TECBLK(N)%NOD2IJK)
+            IF (ALLOCATED(TECBLK(N)%ARR))
+     &        DEALLOCATE(TECBLK(N)%ARR)
+            IF (ALLOCATED(TECBLK(N)%CONNECT))
+     &        DEALLOCATE(TECBLK(N)%CONNECT)
+          ENDDO
+          DEALLOCATE(TECBLK)
+        ENDIF
+        IF (TECBIN) THEN
+          IF (ALLOCATED(PASSIVEVARLIST))
+     &      DEALLOCATE(PASSIVEVARLIST)
+          IF (ALLOCATED(VALUELOCATION))
+     &      DEALLOCATE(VALUELOCATION)
+          IF (ALLOCATED(SHAREVARFROMZONE))
+     &      DEALLOCATE(SHAREVARFROMZONE)
+        ENDIF
+      ENDIF
+
+      END
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_CLOSE()
+!----------------------------------------------------------------------
+! Closes the visual output file.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'layout.h'
+      INCLUDE 'visual.h'
+      INTEGER N,IERR
+$TECBIN      INTEGER*4 TECEND
+
+      IF (TECDBG) WRITE(*,*)'In VIS_TEC_CLOSE, MYPRC,TECEXISTS=',
+     &  MYPRC,TECEXISTS
+
+      CALL VIS_TEC_DEALLOC()
+
+      IF (TECEXISTS) THEN
+        IF (TECBIN) THEN
+$TECBIN          IERR = TECEND()
+          IF (TECDBG) WRITE(*,*)'After TECEND'
+          IF (IERR.NE.0) STOP 'Error with TECEND'
+        ENDIF
+      ENDIF
+
+      END
+
+!******************************************************************************
+! Subroutines for VISFLAG=11 Below
+!******************************************************************************
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_MIMETIC()
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'blkary.h'
+      INCLUDE 'control.h'
+$HYPRE      INCLUDE 'hypre.h'
+      INCLUDE 'layout.h'
+$MPI      INCLUDE 'mpif.h'
+      INCLUDE 'visual.h'
+      INTEGER I,J,K,LT,LT2,CTR,NVARS,IERR,N,IVAR
+      EXTERNAL COUNT_FACES,FILL_FACES,VIS_TEC_ARRAY_MIMETIC
+      CHARACTER TECNAME*(3*$MXVFNAM)
+$MPI      INTEGER ISTAT(MPI_STATUS_SIZE)
+      INTEGER ELECOUNT,FACECOUNT,FACENODECOUNT
+
+      INTEGER*4 :: FILETYPE=0,DEBUG=0,ISDOUBLE=1,ZONETYPE=7,ISBLOCK=1
+      CHARACTER*256 :: TITLE,SCRATCHDIR,ZONETITLE
+      CHARACTER*2048 :: VARIABLES
+      INTEGER*4 :: SHARECONNECTIVITY
+      INTEGER*4 TECINI112,TECZNE112,TECDAT112,TECPOLYFACE112
+
+! Error handling
+      IF ((.NOT.ADAPTIVITY).AND.(NUMBLK.GT.1)) THEN
+        CALL KILL_IPARS('VISFLAG=11 with NUMBLK>1 needs ADAPTIVITY')
+      ENDIF
+      IF (KNDGRD.NE.1) THEN
+        CALL KILL_IPARS('VISFLAG=11 requires BRICKS')
+      ENDIF
+$HYPRE      IF (.FALSE.) THEN
+        CALL KILL_IPARS('VISFLAG=11 requires HYPRE')
+$HYPRE      ENDIF
+$HYPRE      IF ((.NOT.HYPRE_EVFEM).AND.(NUMBLK.GT.1)) THEN
+$HYPRE        CALL KILL_IPARS('VISFLAG=11 with NUMBLK>1 needs HYPRE_EVFEM')
+$HYPRE      ENDIF
+$DUAL      IF (.FALSE.) THEN
+        IF (NUMBLK.GT.1)
+     &    CALL KILL_IPARS('VISFLAG=11 with NUMBLK>1 needs DUAL')
+$DUAL      ENDIF
+
+! Initialization tasks
+      IF (N_LFACES.LE.0) THEN
+        CALL ALCGEA('LFACES ',4,6,N_LFACES,IERR)
+        IF (IERR.NE.0) CALL KILL_IPARS('Could not allocate LFACES')
+      ENDIF
+
+! Handle binary input flag
+      TECBIN = VIS_BINARY
+$TECBIN      IF (.FALSE.) THEN
+          IF (TECBIN.AND.(MYPRC.EQ.0))
+     &      WRITE(*,*)'VIS_BINARY = TRUE was ignored.'
+          TECBIN = .FALSE.
+!          STOP 'Need to compile with vistecbin.mak, '//
+!     &       'or set VIS_BINARY = FALSE.'
+$TECBIN      ENDIF
+      IF ((.NOT.TECBIN).AND.(NUMPRC.GT.1)) THEN
+        CALL KILL_IPARS('VISFLAG=11 with TECBIN=FALSE needs NUMPRC=1')
+      ENDIF
+
+! Compute sizes of current adaptive grid
+      NVARS=VIS_NVARS
+      GNUMNODES=(NXDIM(NUMBLK)+1)*(NYDIM(NUMBLK)+1)*(NZDIM(NUMBLK)+1)
+      LNUMELES=0
+      LNUMFACES=0
+      LNUMFACENODES=0
+      MAXELEONBLK=0
+      CALL CALLWORK(COUNT_FACES,[1,N_LFACES])
+      GNUMELES=LNUMELES
+      GNUMFACES=LNUMFACES
+      GNUMFACENODES=LNUMFACENODES
+      CALL SUMITI(1,GNUMELES)
+      CALL SPREAD(1,GNUMELES)
+      CALL SUMITI(1,GNUMFACES)
+      CALL SPREAD(1,GNUMFACES)
+      CALL SUMITI(1,GNUMFACENODES)
+      CALL SPREAD(1,GNUMFACENODES)
+      CALL MAXITI(1,MAXELEONBLK)
+      CALL SPREAD(1,MAXELEONBLK)
+      MAXFACES=LNUMFACES
+      CALL MAXITI(1,MAXFACES)
+      CALL SPREAD(1,MAXFACES)
+      MAXFACENODES=LNUMFACENODES
+      CALL MAXITI(1,MAXFACENODES)
+      CALL SPREAD(1,MAXFACENODES)
+      IF (TECDBG) THEN
+        WRITE(*,*)'MYPRC,LNUMELES=',MYPRC,LNUMELES
+        WRITE(*,*)'MYPRC,LNUMFACES=',MYPRC,LNUMFACES
+        WRITE(*,*)'MYPRC,LNUMFACENODES=',MYPRC,LNUMFACENODES
+        IF (MYPRC.EQ.0) THEN
+          WRITE(*,*)'GNUMELES=',GNUMELES
+          WRITE(*,*)'GNUMFACES=',GNUMFACES
+          WRITE(*,*)'GNUMFACENODES=',GNUMFACENODES
+          WRITE(*,*)'MAXELEONBLK=',MAXELEONBLK
+          WRITE(*,*)'MAXFACES=',MAXFACES
+          WRITE(*,*)'MAXFACENODES=',MAXFACENODES
+        ENDIF
+$MPI        CALL MPI_BARRIER(MPI_COMM_WORLD,IERR)
+      ENDIF
+
+! Allocate storage for connectivity info
+      ALLOCATE(NODPERFACE(MAXFACES),STAT=IERR)
+      IF (IERR.NE.0) CALL KILL_IPARS('Could not allocate NODPERFACE')
+      ALLOCATE(FACENODES(MAXFACENODES),STAT=IERR)
+      IF (IERR.NE.0) CALL KILL_IPARS('Could not allocate FACENODES')
+      ALLOCATE(LEFTRIGHT(MAXFACES,2),STAT=IERR)
+      IF (IERR.NE.0) CALL KILL_IPARS('Could not allocate LEFTRIGHT')
+
+! Fill connectivity info
+      IFACE = 0
+      INODE = 0
+$HYPRE      CALL CALLWORK(FILL_FACES,[2,N_LFACES,N_GELEI])
+      IF ((IFACE.NE.LNUMFACES).OR.(INODE.NE.LNUMFACENODES)) THEN
+        WRITE(*,*)'Error in VIS_TEC_MIMETIC, MYPRC=',MYPRC
+        WRITE(*,*)'IFACE,LNUMFACES=',IFACE,LNUMFACES
+        WRITE(*,*)'INODE,LNUMFACENODES=',INODE,LNUMFACENODES
+        CALL KILL_IPARS('Bad value of LNUMFACES or LNUMFACENODES')
+      ENDIF
+
+! Other processors skip writing to disk
+      IF (MYPRC.NE.0) GOTO 100
+      WRITE(*,*)'In VIS_TEC_MIMETIC'
+
+! Keep track of cumulative newton counter
+      IF (TIM.EQ.LAST_TIME) THEN
+        CNEWT=CNEWT+1
+      ELSE
+        IF (LAST_TIME.GT.0) CNEWT = 0
+        LAST_TIME = TIM
+      ENDIF
+
+! Form visual time
+      IF (VISNEWT) THEN
+        VTIM = TIM + 1.E-4*CNEWT
+        IF (MYPRC.EQ.0) WRITE(*,'(A,1P,E11.4)')'VISUAL11: VTIM=',VTIM
+      ELSE
+        VTIM = TIM
+      ENDIF
+
+! Arrays for binary output
+      IF (TECBIN.AND..NOT.ALLOCATED(PASSIVEVARLIST)) THEN
+        ALLOCATE(PASSIVEVARLIST(3+NVARS),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate PASSIVEVARLIST'
+        ALLOCATE(VALUELOCATION(3+NVARS),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate VALUELOCATION'
+        ALLOCATE(SHAREVARFROMZONE(3+NVARS),STAT=IERR)
+        IF (IERR.NE.0) STOP 'Could not allocate SHAREVARFROMZONE'
+      ENDIF
+
+! Form TECNAME
+        LT = len_trim(VIS_DIR)
+        IF ((LT.LE.1).OR.(LT.GE.50)) THEN
+          LT = len_trim(VIS_FNAME)
+          WRITE(TECNAME,'(2A)')
+     &      TRIM(VIS_FNAME(1:LT-1)),'.plt'
+        ELSE
+          LT = len_trim(VIS_FNAME)
+          LT2 = len_trim(VIS_DIR)
+          WRITE(TECNAME,'(4A)')
+     &      TRIM(VIS_DIR(1:LT2-1)),'/',TRIM(VIS_FNAME(1:LT-1)),'.plt'
+        ENDIF
+        IF (TECDBG) WRITE(*,*)'TECNAME = ',TRIM(TECNAME)
+
+! If writing to visual output for the first time, create new file
+      IF (.NOT.TECEXISTS) THEN
+        VARIABLES = 'X,Y,Z'
+        DO I=1,NVARS
+          VARIABLES = TRIM(VARIABLES) // ',' //
+     &                TRIM(VIS_VARNAMES(I))
+        ENDDO
+        IF (TECDBG) WRITE(*,*)'VARIABLES=',TRIM(VARIABLES)
+
+        IF (.NOT.TECBIN) THEN
+          OPEN(TECUNIT,file=TRIM(TECNAME),STATUS='unknown')
+          WRITE(TECUNIT,'(3A)')'TITLE = "',TRIM(DATTL(1)),'"'
+          WRITE(TECUNIT,'(A,$)')'VARIABLES = ',TRIM(VARIABLES)
+          WRITE(TECUNIT,*)
+        ELSE
+          SCRATCHDIR = '/tmp' // CHAR(0)
+          VARIABLES = TRIM(VARIABLES) // CHAR(0)
+          TECNAME = TRIM(TECNAME) // CHAR(0)
+$TECBIN          IERR = TECINI112(TRIM(DATTL(1)),TRIM(VARIABLES),
+$TECBIN     &      TRIM(TECNAME),TRIM(SCRATCHDIR),FILETYPE,DEBUG,
+$TECBIN     &      ISDOUBLE)
+          IF (TECDBG) WRITE(*,*)'After TECINI, IERR=',IERR
+          IF (IERR.NE.0) STOP 'Error with TECINI112'
+        ENDIF
+! Else if writing to visual output on subsequent time, append
+      ELSE
+        IF (.NOT.TECBIN)
+     &    OPEN(TECUNIT,file=TRIM(TECNAME),STATUS='old',ACCESS='append')
+      ENDIF
+
+      DO I=1,NVARS
+        IF (VIS_VAL_NODAL(I).EQ.1) THEN
+          CALL KILL_IPARS('Cannot use VISFLAG=11 with nodal variable') 
+          EXIT
+        ENDIF
+      ENDDO
+
+! Write single zone header
+      IF (.NOT.TECBIN) THEN
+        WRITE(TECUNIT,*)
+        WRITE(TECUNIT,'(A)')'ZONE T="domain"'
+        WRITE(TECUNIT,'(1P,A,E15.6)')'SOLUTIONTIME=',VTIM
+        WRITE(TECUNIT,'(A)')'STRANDID=1'
+        WRITE(TECUNIT,'(A)')'ZONETYPE=FEPOLYHEDRON'
+        WRITE(TECUNIT,'(A)')'DATAPACKING=BLOCK'
+        WRITE(TECUNIT,'(A,I)')'NODES=',GNUMNODES
+        WRITE(TECUNIT,'(A,I)')'ELEMENTS=',GNUMELES
+        WRITE(TECUNIT,'(A,I)')'FACES=',GNUMFACES
+        WRITE(TECUNIT,'(A,I)')'TOTALNUMFACENODES=',GNUMFACENODES
+        WRITE(TECUNIT,'(A)')'NUMCONNECTEDBOUNDARYFACES=0'
+        WRITE(TECUNIT,'(A)')'TOTALNUMBOUNDARYCONNECTIONS=0'
+
+        IF (NVARS.GT.0) THEN
+        WRITE(TECUNIT,'(A,$)')'VARLOCATION=(['
+        CTR=0
+        DO I=1,NVARS
+          IF (VIS_VAL_NODAL(I).EQ.0) THEN
+            IF (CTR.NE.0) WRITE(TECUNIT,'(A,$)')','
+            IF (3+I.LT.10) THEN
+              WRITE(TECUNIT,'(I1,$)')3+I
+            ELSEIF (3+I.LT.100) THEN
+              WRITE(TECUNIT,'(I2,$)')3+I
+            ELSE
+              WRITE(TECUNIT,'(I3,$)')3+I
+            ENDIF
+            CTR=CTR+1
+          ENDIF
+        ENDDO
+        WRITE(TECUNIT,'(A)')']=CELLCENTERED)'
+        ENDIF
+      ELSE
+        VALUELOCATION = 1
+        DO I=1,NVARS
+          IF (VIS_VAL_NODAL(I).EQ.0) VALUELOCATION(3+I)=0
+        ENDDO
+        PASSIVEVARLIST = 0
+        SHARECONNECTIVITY = 0
+        SHAREVARFROMZONE = 0
+$TECBIN        IERR = TECZNE112('domain',ZONETYPE,
+$TECBIN     &           GNUMNODES,GNUMELES,GNUMFACES,
+$TECBIN     &           0,0,0,VTIM,1,0,ISBLOCK,0,0,GNUMFACENODES,0,0,
+$TECBIN     &           PASSIVEVARLIST,VALUELOCATION,SHAREVARFROMZONE,
+$TECBIN     &           SHARECONNECTIVITY)
+        IF (TECDBG) WRITE(*,*)'After TECZNE, IERR=',IERR
+      ENDIF
+
+! Processor 0 writes X,Y,Z coordinates
+
+      N=(NXDIM(NUMBLK)+1)*(NYDIM(NUMBLK)+1)
+      ALLOCATE(NODBUF(N),STAT=IERR)
+      IF (IERR.NE.0) CALL KILL_IPARS('Could not allocate NODBUF')
+
+      IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &  WRITE(*,*)'# X'
+      IF (.NOT.TECBIN) WRITE(TECUNIT,'(A)')'# X'
+      DO K = 1,NZDIM(NUMBLK)+1
+      CTR=0
+      DO J = 1,NYDIM(NUMBLK)+1
+      DO I = 1,NXDIM(NUMBLK)+1
+        CTR=CTR+1
+        NODBUF(CTR)=XREC(I,NUMBLK)
+      ENDDO
+      ENDDO
+      IF (.NOT.TECBIN) THEN
+        WRITE(TECUNIT,'(1P,4E15.6)') NODBUF
+      ELSE
+$TECBIN        IERR = TECDAT112(N,NODBUF,ISDOUBLE)
+        IF (IERR.NE.0) STOP 'Error with TECDAT112'
+      ENDIF
+      ENDDO
+
+      IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &  WRITE(*,*)'# Y'
+      IF (.NOT.TECBIN) WRITE(TECUNIT,'(A)')'# Y'
+      DO K = 1,NZDIM(NUMBLK)+1
+      CTR=0
+      DO J = 1,NYDIM(NUMBLK)+1
+      DO I = 1,NXDIM(NUMBLK)+1
+        CTR=CTR+1
+        NODBUF(CTR)=YREC(J,NUMBLK)
+      ENDDO
+      ENDDO
+      IF (.NOT.TECBIN) THEN
+        WRITE(TECUNIT,'(1P,4E15.6)') NODBUF
+      ELSE
+$TECBIN        IERR = TECDAT112(N,NODBUF,ISDOUBLE)
+        IF (IERR.NE.0) STOP 'Error with TECDAT112'
+      ENDIF
+      ENDDO
+
+      IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &  WRITE(*,*)'# Z'
+      IF (.NOT.TECBIN) WRITE(TECUNIT,'(A)')'# Z'
+      DO K = 1,NZDIM(NUMBLK)+1
+      CTR=0
+      DO J = 1,NYDIM(NUMBLK)+1
+      DO I = 1,NXDIM(NUMBLK)+1
+        CTR=CTR+1
+        NODBUF(CTR)=ZREC(K,NUMBLK)
+      ENDDO
+      ENDDO
+      IF (.NOT.TECBIN) THEN
+        WRITE(TECUNIT,'(1P,4E15.6)') NODBUF
+      ELSE
+$TECBIN        IERR = TECDAT112(N,NODBUF,ISDOUBLE)
+        IF (IERR.NE.0) STOP 'Error with TECDAT112'
+      ENDIF
+      ENDDO
+
+      IF (ALLOCATED(NODBUF)) DEALLOCATE(NODBUF)
+
+! Other processors continue here
+ 100  CONTINUE
+
+! Write cell-centered variable data
+      ALLOCATE(BUF(MAXELEONBLK),STAT=IERR)
+      IF (IERR.NE.0) CALL KILL_IPARS('Could not allocate BUF')
+      DO IVAR=1,VIS_NVARS
+
+      I4UTIL=IVAR
+      IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &  WRITE(*,*)'# ',TRIM(VIS_VARNAMES(IVAR))
+      IF (.NOT.TECBIN)
+     &  WRITE(TECUNIT,'(2A)')'# ',TRIM(VIS_VARNAMES(IVAR))
+
+      ELECOUNT=0
+      DO IPRC=0,NUMPRC-1
+      DO IBLK=1,NUMBLK
+        IBUF(1)=0
+        CALL CALLWORK(VIS_TEC_ARRAY_MIMETIC,
+     &    [2,N_I4U,N_VIS_VARS(IVAR,CURRENT_MODEL)])
+        CALL SUMITI(1,IBUF)
+
+        IF (MYPRC.EQ.0) THEN
+          IF (IPRC.GT.0) THEN
+$MPI            CALL MPI_RECV(BUF,IBUF(1),MPI_DOUBLE_PRECISION,IPRC,
+$MPI     &        IVAR*10000+IPRC,MPI_COMM_WORLD,ISTAT,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_RECV'
+          ENDIF
+          IF (.NOT.TECBIN) THEN
+            WRITE(TECUNIT,'(1P,4E15.6)')BUF(1:IBUF(1))
+          ELSE
+$TECBIN            IERR = TECDAT112(IBUF(1),BUF,ISDOUBLE)
+            IF (IERR.NE.0) STOP 'Error with TECDAT112'
+          ENDIF
+          ELECOUNT=ELECOUNT+IBUF(1)
+        ELSE
+          IF (MYPRC.EQ.IPRC) THEN
+$MPI            CALL MPI_SEND(BUF,IBUF(1),MPI_DOUBLE_PRECISION,0,
+$MPI     &        IVAR*10000+IPRC,MPI_COMM_WORLD,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_SEND'
+          ENDIF
+        ENDIF
+      ENDDO
+      ENDDO
+      IF (MYPRC.EQ.0) THEN
+        IF (ELECOUNT.NE.GNUMELES)
+     &    CALL KILL_IPARS('VISFLAG=11 Error: ELECOUNT != GNUMELES')
+      ENDIF
+ 
+      ENDDO
+      IF (ALLOCATED(BUF)) DEALLOCATE(BUF)
+
+! Write face-based connectivity information
+
+      FACECOUNT=0
+      FACENODECOUNT=0
+      DO IPRC=0,NUMPRC-1
+        IBUF(:)=0
+        IF (MYPRC.EQ.IPRC) THEN
+          IBUF(1)=LNUMFACES
+          IBUF(2)=LNUMFACENODES
+        ENDIF
+        CALL SUMITI(2,IBUF)
+
+        IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &    WRITE(*,*)'# node count per face'
+        IF (MYPRC.EQ.0) THEN
+          IF (IPRC.GT.0) THEN
+$MPI            CALL MPI_RECV(NODPERFACE,IBUF(1),MPI_INTEGER,
+$MPI     &        IPRC,10000+IPRC,MPI_COMM_WORLD,ISTAT,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_RECV for node count'
+          ENDIF
+          IF (.NOT.TECBIN) THEN
+            WRITE(TECUNIT,'(A)')'# node count per face'
+            WRITE(TECUNIT,'(1P,4E15.6)')NODPERFACE(1:IBUF(1))
+          ENDIF
+        ELSE
+          IF (MYPRC.EQ.IPRC) THEN
+$MPI            CALL MPI_SEND(NODPERFACE,IBUF(1),MPI_INTEGER,
+$MPI     &        0,10000+IPRC,MPI_COMM_WORLD,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_SEND for node count'
+          ENDIF
+        ENDIF
+
+        IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &    WRITE(*,*)'# face nodes'                                
+        IF (MYPRC.EQ.0) THEN
+          IF (IPRC.GT.0) THEN
+$MPI            CALL MPI_RECV(FACENODES,IBUF(2),MPI_INTEGER,                
+$MPI     &        IPRC,20000+IPRC,MPI_COMM_WORLD,ISTAT,IERR)                            
+            IF (IERR.NE.0) STOP 'Error with MPI_RECV for face nodes'
+          ENDIF
+          IF (.NOT.TECBIN) THEN
+            WRITE(TECUNIT,'(A)')'# face nodes'                                
+            WRITE(TECUNIT,'(1P,4E15.6)')FACENODES(1:IBUF(2))                         
+          ENDIF                                                                    
+        ELSE 
+          IF (MYPRC.EQ.IPRC) THEN
+$MPI            CALL MPI_SEND(FACENODES,IBUF(2),MPI_INTEGER,                
+$MPI     &        0,20000+IPRC,MPI_COMM_WORLD,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_SEND for face nodes'
+          ENDIF                                                                    
+        ENDIF                                                                      
+
+        IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &    WRITE(*,*)'# left elements'
+        IF (MYPRC.EQ.0) THEN
+          IF (IPRC.GT.0) THEN
+$MPI            CALL MPI_RECV(LEFTRIGHT(:,1),IBUF(1),MPI_INTEGER,
+$MPI     &        IPRC,30000+IPRC,MPI_COMM_WORLD,ISTAT,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_RECV for left elements'
+          ENDIF
+          IF (.NOT.TECBIN) THEN
+            WRITE(TECUNIT,'(A)')'# left elements'
+            WRITE(TECUNIT,'(1P,4E15.6)')LEFTRIGHT(1:IBUF(1),1)
+          ENDIF
+        ELSE
+          IF (MYPRC.EQ.IPRC) THEN
+$MPI            CALL MPI_SEND(LEFTRIGHT(:,1),IBUF(1),MPI_INTEGER,
+$MPI     &        0,30000+IPRC,MPI_COMM_WORLD,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_SEND for left elements'
+          ENDIF
+        ENDIF
+
+        IF ((TECDBG).AND.(MYPRC.EQ.0))
+     &    WRITE(*,*)'# right elements'
+        IF (MYPRC.EQ.0) THEN
+          IF (IPRC.GT.0) THEN
+$MPI            CALL MPI_RECV(LEFTRIGHT(:,2),IBUF(1),MPI_INTEGER,
+$MPI     &        IPRC,40000+IPRC,MPI_COMM_WORLD,ISTAT,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_RECV for right elements'
+          ENDIF
+          IF (.NOT.TECBIN) THEN
+            WRITE(TECUNIT,'(A)')'# right elements'
+            WRITE(TECUNIT,'(1P,4E15.6)')LEFTRIGHT(1:IBUF(1),1)
+          ENDIF
+        ELSE
+          IF (MYPRC.EQ.IPRC) THEN
+$MPI            CALL MPI_SEND(LEFTRIGHT(:,2),IBUF(1),MPI_INTEGER,
+$MPI     &        0,40000+IPRC,MPI_COMM_WORLD,IERR)
+            IF (IERR.NE.0) STOP 'Error with MPI_SEND for right elements'
+          ENDIF
+        ENDIF
+
+        IF (MYPRC.EQ.0) THEN
+$TECBIN        IF (TECBIN)
+$TECBIN     &    IERR = TECPOLYFACE112(IBUF(1),NODPERFACE,FACENODES,
+$TECBIN     &      LEFTRIGHT(:,1),LEFTRIGHT(:,2))
+        IF (TECDBG) WRITE(*,*)'After TECPOLY, IPRC,IERR,IBUF=',
+     &    IPRC,IERR,IBUF
+        FACECOUNT=FACECOUNT+IBUF(1)
+        FACENODECOUNT=FACENODECOUNT+IBUF(2)
+        IF (IERR.NE.0) STOP 'Error with TECTECPOLYFACE112'
+        ENDIF
+
+      ENDDO
+      IF (MYPRC.EQ.0) THEN
+        IF (FACECOUNT.NE.GNUMFACES)
+     &    CALL KILL_IPARS('VISFLAG=11 Error: FACECOUNT != GNUMFACES')
+        IF (FACENODECOUNT.NE.GNUMFACENODES)
+     &    CALL KILL_IPARS(
+     &      'VISFLAG=11 Error: FACENODECOUNT != GNUMFACENODES')
+      ENDIF
+
+!      IF (.NOT.TECBIN) THEN
+!        WRITE(TECUNIT,'(A)')'# node count per face'
+!        WRITE(TECUNIT,'(10I)')NODPERFACE
+!        WRITE(TECUNIT,'(A)')'# face nodes'
+!        WRITE(TECUNIT,'(10I)')FACENODES
+!        WRITE(TECUNIT,'(A)')'# left elements'
+!        WRITE(TECUNIT,'(10I)')LEFTRIGHT(:,1)
+!        WRITE(TECUNIT,'(A)')'# right elements'
+!        WRITE(TECUNIT,'(10I)')LEFTRIGHT(:,2)
+!      ELSE
+!$TECBIN        IERR = TECPOLYFACE112(LNUMFACES,NODPERFACE,FACENODES,
+!$TECBIN     &    LEFTRIGHT(:,1),LEFTRIGHT(:,2))
+!        IF (TECDBG) WRITE(*,*)'After TECPOLYFACE112, IERR=',IERR
+!        IF (IERR.NE.0) STOP 'Error with TECTECPOLYFACE112'
+!      ENDIF
+
+! Processor 0 closes ascii file or sets exists flag
+      IF (MYPRC.EQ.0) THEN
+        IF (.NOT.TECBIN) CLOSE(TECUNIT)
+        IF (.NOT.TECEXISTS) TECEXISTS = .TRUE.
+      ENDIF
+
+! Deallocate dynamic memory
+      IF (ALLOCATED(NODPERFACE)) DEALLOCATE(NODPERFACE)
+      IF (ALLOCATED(FACENODES)) DEALLOCATE(FACENODES)
+      IF (ALLOCATED(LEFTRIGHT)) DEALLOCATE(LEFTRIGHT)
+
+      END
+
+!----------------------------------------------------------------------
+      SUBROUTINE COUNT_FACES(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,LFACES)
+!----------------------------------------------------------------------
+$DUAL      USE adaptmod
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'layout.h'
+$DUAL      INCLUDE 'sblkc.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK
+      INTEGER LFACES(IDIM,JDIM,KDIM,6)
+
+      INTEGER IERR,I,J,K,K1,K2,IA,JA,KA,J1,J2,KD,N,MBLK,STRIDE,CTR,ND
+
+! Meaning of LFACES array:
+!  -1=outside face, 0=inside face, >0=#dual faces
+! Meaning of 4th index follows dual convention:
+!   1=x+, 2=y+, 3=z+, 4=x-, 5=y-, 6=z-
+      LFACES(:,:,:,:) = -1
+
+! First we order dual faces
+$DUAL      K1=IIEBS(NBLK)
+$DUAL      K2=K1+NIEBS(NBLK)-1
+$DUAL      DO K=K1,K2         ! Loop over A-block elements K
+$DUAL      IA=IJKS(1,K)       ! Subdomain element on interface
+$DUAL      JA=IJKS(2,K)
+$DUAL      KA=IJKS(3,K)
+$DUAL      J1=ICGES(K)
+$DUAL      J2=J1+NCGES(K)-1
+$DUAL      DO J=J1,J2         ! Loop over A-B interactions J
+$DUAL      KD=KDIRS(J)
+
+$DUAL      IF (LFACES(IA,JA,KA,KD).EQ.-1) THEN
+$DUAL        LFACES(IA,JA,KA,KD)=0
+$DUAL      ENDIF
+$DUAL      LFACES(IA,JA,KA,KD)=LFACES(IA,JA,KA,KD)+1
+
+$DUAL      IF (KD.LT.4) THEN
+
+$DUAL      LNUMFACES=LNUMFACES+1
+$DUAL      MBLK=MAX(NBLK,JBLOCK(J))
+$DUAL      STRIDE=NSTRIDE**(NLEVA-MBLK)
+$DUAL      IF (KD.EQ.1) THEN                        ! 2D Face
+$DUAL        LNUMFACENODES=LNUMFACENODES+4*STRIDE
+$DUAL      ELSEIF (ND.EQ.3) THEN                    ! 2D Face
+$DUAL        LNUMFACENODES=LNUMFACENODES+4*STRIDE
+$DUAL      ELSE                                     ! 1D Face
+$DUAL        LNUMFACENODES=LNUMFACENODES+2*(STRIDE+1)
+$DUAL      ENDIF
+
+$DUAL      ENDIF
+
+$DUAL      ENDDO  ! End do-loop over A-B interactions J
+$DUAL      ENDDO  ! End do-loop over A-block faces K
+
+! Active elements
+      CTR=0
+      DO K=KL1,KL2
+      DO J=JL1V(K),JL2V(K)
+      DO I=IL1,IL2
+      IF (KEYOUT(I,J,K).EQ.1) CTR=CTR+1
+      ENDDO
+      ENDDO
+      ENDDO
+      MAXELEONBLK=MAX(MAXELEONBLK,CTR)
+      LNUMELES=LNUMELES+CTR
+
+! X-Faces
+      DO K=KL1,KL2
+      DO J=JL1V(K),JL2V(K)
+      DO I=IL1,IL2+1
+      IF ((KEYOUT(I-1,J,K).NE.0).AND.(KEYOUT(I,J,K).NE.0)) THEN
+        LFACES(I-1,J,K,1)=0
+        LFACES(I,J,K,4)=0
+      ENDIF
+      ENDDO
+      ENDDO
+      ENDDO
+
+! Y-Faces
+      DO K=KL1,KL2
+      DO J=JL1V(K),JL2V(K)+1
+      DO I=IL1,IL2
+      IF ((KEYOUT(I,J-1,K).NE.0).AND.(KEYOUT(I,J,K).NE.0)) THEN
+        LFACES(I,J-1,K,2)=0
+        LFACES(I,J,K,5)=0
+      ENDIF
+      ENDDO
+      ENDDO
+      ENDDO
+
+! Z-Faces
+      DO K=KL1,KL2+1
+      DO J=JL1V(K),JL2V(K)
+      DO I=IL1,IL2
+      IF ((KEYOUT(I,J,K-1).NE.0).AND.(KEYOUT(I,J,K).NE.0)) THEN
+        LFACES(I,J,K-1,3)=0
+        LFACES(I,J,K,6)=0
+      ENDIF
+      ENDDO
+      ENDDO
+      ENDDO
+
+! To prevent face duplication, count all high faces and only outside low faces
+      STRIDE=1
+      ND=3
+      IF (ADAPTIVITY) THEN
+$DUAL      STRIDE=NSTRIDE**(NLEVA-NBLK)
+$DUAL      ND=NDIMA
+      ENDIF
+      DO K=KL1,KL2
+      DO J=JL1V(K),JL2V(K)
+      DO I=IL1,IL2
+        IF (KEYOUT(I,J,K).NE.1) CYCLE
+        IF (LFACES(I,J,K,1).LE.0) THEN
+          LNUMFACES=LNUMFACES+1
+          LNUMFACENODES=LNUMFACENODES+4*STRIDE
+        ENDIF
+        IF (LFACES(I,J,K,2).LE.0) THEN
+          LNUMFACES=LNUMFACES+1
+          IF (ND.EQ.3) THEN
+            LNUMFACENODES=LNUMFACENODES+4*STRIDE
+          ELSE
+            LNUMFACENODES=LNUMFACENODES+2*(STRIDE+1)
+          ENDIF
+        ENDIF
+        IF (LFACES(I,J,K,3).LE.0) THEN
+          LNUMFACES=LNUMFACES+1
+          IF (ND.EQ.3) THEN
+            LNUMFACENODES=LNUMFACENODES+4*STRIDE
+          ELSE
+            LNUMFACENODES=LNUMFACENODES+2*(STRIDE+1)
+          ENDIF
+        ENDIF
+        IF (LFACES(I,J,K,4).EQ.-1) THEN
+          LNUMFACES=LNUMFACES+1
+          LNUMFACENODES=LNUMFACENODES+4*STRIDE
+        ENDIF
+        IF (LFACES(I,J,K,5).EQ.-1) THEN
+          LNUMFACES=LNUMFACES+1
+          IF (ND.EQ.3) THEN
+            LNUMFACENODES=LNUMFACENODES+4*STRIDE
+          ELSE
+            LNUMFACENODES=LNUMFACENODES+2*(STRIDE+1)
+          ENDIF
+        ENDIF
+        IF (LFACES(I,J,K,6).EQ.-1) THEN
+          LNUMFACES=LNUMFACES+1
+          IF (ND.EQ.3) THEN
+            LNUMFACENODES=LNUMFACENODES+4*STRIDE
+          ELSE
+            LNUMFACENODES=LNUMFACENODES+2*(STRIDE+1)
+          ENDIF
+        ENDIF
+      ENDDO
+      ENDDO
+      ENDDO
+
+      END SUBROUTINE COUNT_FACES
+
+!----------------------------------------------------------------------
+      SUBROUTINE FILL_FACES(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,LFACES,GELEI)
+!----------------------------------------------------------------------
+$DUAL      USE adaptmod
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'layout.h'
+$HYPRE$DUAL      INCLUDE 'hypre_dual.h'
+$DUAL      INCLUDE 'sblkc.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK
+      INTEGER LFACES(IDIM,JDIM,KDIM,6)
+      INTEGER GELEI(IDIM,JDIM,KDIM)
+
+      INTEGER IERR,I,J,K,K1,K2,IA,JA,KA,J1,J2,KD,N,MBLK,STRIDE,ND,
+     &        IOFF,JOFF,KOFF,IG,JG,KG,KD2
+
+      CALL BLKOFF(NBLK,IOFF,JOFF,KOFF,IERR)
+
+! First we order dual faces
+$DUAL      K1=IIEBS(NBLK)
+$DUAL      K2=K1+NIEBS(NBLK)-1
+$DUAL      DO K=K1,K2         ! Loop over A-block elements K
+$DUAL      IA=IJKS(1,K)       ! Subdomain element on interface
+$DUAL      JA=IJKS(2,K)
+$DUAL      KA=IJKS(3,K)
+$DUAL      J1=ICGES(K)
+$DUAL      J2=J1+NCGES(K)-1
+$DUAL      DO J=J1,J2         ! Loop over A-B interactions J
+$DUAL      KD=KDIRS(J)
+$DUAL      IF (KD.LT.4) THEN
+
+$DUAL      IFACE=IFACE+1
+$DUAL      MBLK=MAX(NBLK,JBLOCK(J))
+$DUAL      STRIDE=NSTRIDE**(NLEVA-MBLK)
+
+$DUAL      IF (KD.EQ.1) THEN                        ! 2D Face
+$DUAL        NODPERFACE(IFACE)=4*STRIDE
+$DUAL      ELSEIF (ND.EQ.3) THEN                    ! 2D Face
+$DUAL        NODPERFACE(IFACE)=4*STRIDE
+$DUAL      ELSE                                     ! 1D Face
+$DUAL        NODPERFACE(IFACE)=2*(STRIDE+1)
+$DUAL      ENDIF
+
+$DUAL      IF (NBLK.EQ.MBLK) THEN
+$DUAL        IG=IA+IOFF
+$DUAL        JG=JA+JOFF
+$DUAL        KG=KA+KOFF
+$DUAL        CALL FILL_FACE_NODES(MBLK,IG,JG,KG,KD)
+$DUAL      ELSE
+$DUAL        IG=IJKT(1,J)
+$DUAL        JG=IJKT(2,J)
+$DUAL        KG=IJKT(3,J)
+$DUAL        KD2=KD+3
+$DUAL        CALL FILL_FACE_NODES(MBLK,IG,JG,KG,KD2)
+$DUAL      ENDIF
+
+$DUAL      IF (KD.EQ.2) THEN
+$DUAL        LEFTRIGHT(IFACE,1)=GELEI_EV(J,1,1)
+$DUAL        LEFTRIGHT(IFACE,2)=GELEI(IA,JA,KA)
+$DUAL      ELSE
+$DUAL        LEFTRIGHT(IFACE,1)=GELEI(IA,JA,KA)
+$DUAL        LEFTRIGHT(IFACE,2)=GELEI_EV(J,1,1)
+$DUAL      ENDIF
+!$DUAL          IF ((LEFTRIGHT(IFACE,1).EQ.0).AND.(LEFTRIGHT(IFACE,2).EQ.0))
+!$DUAL     &      WRITE(*,*)'FILL_FACES Error: MYPRC,NBLK,IA,JA,KA,KD=',
+!$DUAL     &      MYPRC,NBLK,IA,JA,KA,KD
+
+$DUAL      ENDIF
+$DUAL      ENDDO  ! End do-loop over A-B interactions J
+$DUAL      ENDDO  ! End do-loop over A-block faces K
+
+! To prevent face duplication, count all high faces and only outside low faces
+      STRIDE=1
+      ND=3
+      IF (ADAPTIVITY) THEN
+$DUAL      STRIDE=NSTRIDE**(NLEVA-NBLK)
+$DUAL      ND=NDIMA
+      ENDIF
+      DO K=KL1,KL2
+      DO J=JL1V(K),JL2V(K)
+      DO I=IL1,IL2
+        IF (KEYOUT(I,J,K).NE.1) CYCLE
+        IF (LFACES(I,J,K,1).LE.0) THEN
+          IFACE=IFACE+1
+          NODPERFACE(IFACE)=4*STRIDE
+          IG=I+IOFF
+          JG=J+JOFF
+          KG=K+KOFF
+          KD=1
+          CALL FILL_FACE_NODES(NBLK,IG,JG,KG,KD)
+          LEFTRIGHT(IFACE,1)=GELEI(I,J,K)
+          LEFTRIGHT(IFACE,2)=GELEI(I+1,J,K)
+!          IF ((LEFTRIGHT(IFACE,1).EQ.0).AND.(LEFTRIGHT(IFACE,2).EQ.0))
+!     &      WRITE(*,*)'FILL_FACES Error: MYPRC,NBLK,I,J,K,FACE=',
+!     &      MYPRC,NBLK,I,J,K,1
+        ENDIF
+        IF (LFACES(I,J,K,2).LE.0) THEN
+          IFACE=IFACE+1
+          IF (ND.EQ.3) THEN
+            NODPERFACE(IFACE)=4*STRIDE
+          ELSE
+            NODPERFACE(IFACE)=2*(STRIDE+1)
+          ENDIF
+          IG=I+IOFF
+          JG=J+JOFF
+          KG=K+KOFF
+          KD=2
+          CALL FILL_FACE_NODES(NBLK,IG,JG,KG,KD)
+          LEFTRIGHT(IFACE,1)=GELEI(I,J+1,K)
+          LEFTRIGHT(IFACE,2)=GELEI(I,J,K)
+!          IF ((LEFTRIGHT(IFACE,1).EQ.0).AND.(LEFTRIGHT(IFACE,2).EQ.0))
+!     &      WRITE(*,*)'FILL_FACES Error: MYPRC,NBLK,I,J,K,FACE=',
+!     &      MYPRC,NBLK,I,J,K,2
+        ENDIF
+        IF (LFACES(I,J,K,3).LE.0) THEN
+          IFACE=IFACE+1
+          IF (ND.EQ.3) THEN
+            NODPERFACE(IFACE)=4*STRIDE
+          ELSE
+            NODPERFACE(IFACE)=2*(STRIDE+1)
+          ENDIF
+          IG=I+IOFF
+          JG=J+JOFF
+          KG=K+KOFF
+          KD=3
+          CALL FILL_FACE_NODES(NBLK,IG,JG,KG,KD)
+          LEFTRIGHT(IFACE,1)=GELEI(I,J,K)
+          LEFTRIGHT(IFACE,2)=GELEI(I,J,K+1)
+!          IF ((LEFTRIGHT(IFACE,1).EQ.0).AND.(LEFTRIGHT(IFACE,2).EQ.0))
+!     &      WRITE(*,*)'FILL_FACES Error: MYPRC,NBLK,I,J,K,FACE=',
+!     &      MYPRC,NBLK,I,J,K,3
+        ENDIF
+        IF (LFACES(I,J,K,4).EQ.-1) THEN
+          IFACE=IFACE+1
+          NODPERFACE(IFACE)=4*STRIDE
+          IG=I+IOFF
+          JG=J+JOFF
+          KG=K+KOFF
+          KD=4
+          CALL FILL_FACE_NODES(NBLK,IG,JG,KG,KD)
+          LEFTRIGHT(IFACE,1)=GELEI(I-1,J,K)
+          LEFTRIGHT(IFACE,2)=GELEI(I,J,K)
+!          IF ((LEFTRIGHT(IFACE,1).EQ.0).AND.(LEFTRIGHT(IFACE,2).EQ.0))
+!     &      WRITE(*,*)'FILL_FACES Error: MYPRC,NBLK,I,J,K,FACE=',
+!     &      MYPRC,NBLK,I,J,K,4
+        ENDIF
+        IF (LFACES(I,J,K,5).EQ.-1) THEN
+          IFACE=IFACE+1
+          IF (ND.EQ.3) THEN
+            NODPERFACE(IFACE)=4*STRIDE
+          ELSE
+            NODPERFACE(IFACE)=2*(STRIDE+1)
+          ENDIF
+          IG=I+IOFF
+          JG=J+JOFF
+          KG=K+KOFF
+          KD=5
+          CALL FILL_FACE_NODES(NBLK,IG,JG,KG,KD)
+          LEFTRIGHT(IFACE,1)=GELEI(I,J,K)
+          LEFTRIGHT(IFACE,2)=GELEI(I,J-1,K)
+!          IF ((LEFTRIGHT(IFACE,1).EQ.0).AND.(LEFTRIGHT(IFACE,2).EQ.0))
+!     &      WRITE(*,*)'FILL_FACES Error: MYPRC,NBLK,I,J,K,FACE=',
+!     &      MYPRC,NBLK,I,J,K,5
+        ENDIF
+        IF (LFACES(I,J,K,6).EQ.-1) THEN
+          IFACE=IFACE+1
+          IF (ND.EQ.3) THEN
+            NODPERFACE(IFACE)=4*STRIDE
+          ELSE
+            NODPERFACE(IFACE)=2*(STRIDE+1)
+          ENDIF
+          IG=I+IOFF
+          JG=J+JOFF
+          KG=K+KOFF
+          KD=6
+          CALL FILL_FACE_NODES(NBLK,IG,JG,KG,KD)
+          LEFTRIGHT(IFACE,1)=GELEI(I,J,K-1)
+          LEFTRIGHT(IFACE,2)=GELEI(I,J,K)
+!          IF ((LEFTRIGHT(IFACE,1).EQ.0).AND.(LEFTRIGHT(IFACE,2).EQ.0))
+!     &      WRITE(*,*)'FILL_FACES Error: MYPRC,NBLK,I,J,K,FACE=',
+!     &      MYPRC,NBLK,I,J,K,6
+        ENDIF
+      ENDDO
+      ENDDO
+      ENDDO
+
+      END SUBROUTINE FILL_FACES
+
+!----------------------------------------------------------------------
+      SUBROUTINE FILL_FACE_NODES(NBLK,I,J,K,KD)
+!----------------------------------------------------------------------
+$DUAL      USE adaptmod
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'blkary.h'
+      INCLUDE 'layout.h'
+      INTEGER, INTENT(IN) :: NBLK,I,J,K,KD
+      INTEGER STRIDE,ND,IFINE,JFINE,KFINE,ILAST,JLAST,KLAST,I2,J2,K2
+      INTEGER, EXTERNAL :: NODENUM
+
+      STRIDE=1
+      ND=3
+      IF (ADAPTIVITY) THEN
+$DUAL      STRIDE=NSTRIDE**(NLEVA-NBLK)
+$DUAL      ND=NDIMA
+      ENDIF
+      KFINE=(K-1)*STRIDE + 1
+      KLAST=K*STRIDE + 1
+      JFINE=(J-1)*STRIDE + 1
+      JLAST=J*STRIDE + 1
+      IF (ND.EQ.3) THEN
+        IFINE=(I-1)*STRIDE + 1
+        ILAST=I*STRIDE + 1
+      ELSE
+        IFINE=I
+        ILAST=IFINE + 1
+      ENDIF
+
+      IF ((KD.EQ.1).OR.(KD.EQ.4)) THEN
+        IF (KD.EQ.1) THEN
+          I2=ILAST
+        ELSE
+          I2=IFINE
+        ENDIF
+        K2=KFINE
+        DO J2=JFINE,JLAST
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        J2=JLAST
+        DO K2=KFINE+1,KLAST
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        K2=KLAST
+        DO J2=JLAST-1,JFINE,-1
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        J2=JFINE
+        DO K2=KLAST-1,KFINE+1,-1
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+      ELSEIF ((KD.EQ.2).OR.(KD.EQ.5)) THEN
+        IF (KD.EQ.2) THEN
+          J2=JLAST
+        ELSE
+          J2=JFINE
+        ENDIF
+        K2=KFINE
+        DO I2=IFINE,ILAST
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        I2=ILAST
+        DO K2=KFINE+1,KLAST
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        K2=KLAST
+        DO I2=ILAST-1,IFINE,-1
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        I2=IFINE
+        DO K2=KLAST-1,KFINE+1,-1
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+      ELSE   ! KD=3 or KD=6
+        IF (KD.EQ.3) THEN
+          K2=KLAST
+        ELSE
+          K2=KFINE
+        ENDIF
+        J2=JFINE
+        DO I2=IFINE,ILAST
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        I2=ILAST
+        DO J2=JFINE+1,JLAST
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        J2=JLAST
+        DO I2=ILAST-1,IFINE,-1
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+        I2=IFINE
+        DO J2=JLAST-1,JFINE+1,-1
+          INODE=INODE+1
+          FACENODES(INODE)=NODENUM(I2,J2,K2)
+        ENDDO
+      ENDIF
+
+      END SUBROUTINE FILL_FACE_NODES
+
+!----------------------------------------------------------------------
+      INTEGER FUNCTION NODENUM(I,J,K)
+!----------------------------------------------------------------------
+      IMPLICIT NONE
+      INCLUDE 'blkary.h'
+      INCLUDE 'layout.h'
+      INTEGER, INTENT(IN) :: I,J,K
+!      INTEGER N
+!      N=(NXDIM(NUMBLK)+1)*(NYDIM(NUMBLK)+1)*(NZDIM(NUMBLK)+1)
+      NODENUM=I+(NXDIM(NUMBLK)+1)*((J-1)+(NYDIM(NUMBLK)+1)*(K-1))
+!      IF ((NODENUM.LT.1).OR.(NODENUM.GT.N)) THEN
+!        WRITE(*,*)'Error: NODENUM=',NODENUM
+!        WRITE(*,*)'I,J,K=',I,J,K
+!        WRITE(*,*)1/0
+!      ENDIF
+      END FUNCTION NODENUM
+
+!----------------------------------------------------------------------
+      SUBROUTINE VIS_TEC_ARRAY_MIMETIC(IDIM,JDIM,KDIM,LDIM,IL1,IL2,
+     &     JL1V,JL2V,KL1,KL2,KEYOUT,NBLK,IVAR,VAR)
+!----------------------------------------------------------------------
+! Writes one nodal or cell-centered variable in block format.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK,IVAR,IOFF
+      REAL*8  VAR(IDIM,JDIM,KDIM,*)
+      INTEGER I,J,K,L,CTR,II,JJ,KK,IERR,NTYPGA,ND4GA,KARR
+
+      CALL ARYDAT(VIS_VARNAMES(IVAR),NTYPGA,ND4GA,KARR,IERR)
+      IOFF=VIS_OFFSETS(IVAR)
+      IF ((NTYPGA.EQ.1).OR.(NTYPGA.EQ.2)) THEN
+        CALL MIMETIC_ARRAY48(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,IVAR,VAR,VAR,IOFF,NTYPGA)
+      ELSE
+        CALL KILL_IPARS('Unknown var type in VIS_TEC_ARRAY_MIMETIC')
+      ENDIF
+
+      END
+
+!----------------------------------------------------------------------
+      SUBROUTINE MIMETIC_ARRAY48(IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V,
+     &     JL2V,KL1,KL2,KEYOUT,NBLK,IVAR,VAR4,VAR8,IOFF,NTYPGA)
+!----------------------------------------------------------------------
+! Writes one nodal or cell-centered variable in block format.
+!----------------------------------------------------------------------
+      USE tecbinmod
+      IMPLICIT NONE
+      INCLUDE 'control.h'
+      INCLUDE 'visual.h'
+      INTEGER IDIM,JDIM,KDIM,LDIM,IL1,IL2,JL1V(KDIM),JL2V(KDIM),
+     &        KL1,KL2,KEYOUT(IDIM,JDIM,KDIM),NBLK,IVAR,IOFF,NTYPGA
+      REAL*4  VAR4(IDIM,JDIM,KDIM,*)
+      REAL*8  VAR8(IDIM,JDIM,KDIM,*)
+      INTEGER I,J,K,CTR
+!----------------------------------------------------------------------
+
+      IF ((MYPRC.NE.IPRC).OR.(NBLK.NE.IBLK)) RETURN
+
+      IF (VIS_VAL_NODAL(IVAR).NE.0) THEN
+        CALL KILL_IPARS('Cannot call MIMETIC_ARRAY48 with nodal var')
+      ENDIF
+
+      CTR=0
+      IF (NTYPGA.EQ.2) THEN
+        DO K = KL1,KL2
+        DO J = JL1V(K),JL2V(K)
+        DO I = IL1,IL2
+        IF (KEYOUT(I,J,K).EQ.1) THEN
+          CTR=CTR+1
+          BUF(CTR)=VAR8(I,J,K,IOFF)
+        ENDIF
+        ENDDO
+        ENDDO
+        ENDDO
+      ELSE
+        DO K = KL1,KL2
+        DO J = JL1V(K),JL2V(K)
+        DO I = IL1,IL2
+        IF (KEYOUT(I,J,K).EQ.1) THEN
+          CTR=CTR+1
+          BUF=DBLE(VAR4(I,J,K,IOFF))
+        ENDIF
+        ENDDO
+        ENDDO
+        ENDDO
+      ENDIF
+      IBUF(1)=CTR
+
+      END

@@ -1,0 +1,349 @@
+TITLE(2)="2-Phase Flow Fracture Meshed-in"
+
+DESCRIPTION()=
+"LENGTH (FT) : 5"
+"WIDTH (FT) : 5"
+"THICKNESS (FT) : 5"
+"GRID BLOCKS : 1X3X1   50 GRID ELEMENTS"
+"DATE : 12/09/11"
+
+BLOCKMODEL(1) = "POROELASTIC"
+FLOW_MODEL = "MPFA_HYDROLOGY_IMPES"
+
+$BLOCKMODEL(1) = "MPFA_HYDROLOGY_IMPES"
+
+$TIMEEND = 100.0
+$TIMEEND = 30.0
+TIMEEND = 1.0
+
+$ I/O OPTIONS
+WELLOUTKEY = 3   WELLFILE = "testout.WEL"
+
+OUTLEVEL = 2  
+GITERATIVE = 1  $ ITERATIVELY COUPLED IMPES
+$GITERATIVE = 0 $ CONVENTIONAL IMPES
+GMAXITER = 5   $ MAX ITERATIVE COUPLING STEPS
+GCITERMAX = 20 $ MAX GEOMECH RESERVOIR COUPLING STEPS
+GCITERMAX = 200 $ MAX GEOMECH RESERVOIR COUPLING STEPS
+NSATSTEP = 1
+MAXNEWT = 20    $ MAX PRES NEWT STEP (DEFAULT 20)
+$ VIS_TABOUTTYPE (specific to v.2)
+PROCOUT
+JSTEP(,)=1
+KSTEP(,)=1
+
+
+$TYPE OF MOBILILITY AVERAGING
+$AVGMOB = 1  $AVERAGED 
+$AVGMOB = 0   $UPWINDED  $(default)
+
+$ Convergence Tolerance for iterative coupling
+ CVTOL = 1.0E-4
+
+$$$ FAULT BLOCK AND MESH DATA
+
+BLOCKNAME(1) = "BLOCK1"
+DOWN(1 TO 3,1) =0. 0. 1.
+
+$corner point geometry
+Include mesh.dat
+
+$ Fracture geometry data
+$  FRAC_FILE = "frac.dat"
+
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+$ BOUNDARY CONDITIONS INCLUDING INTERNAL BOUNDARIES
+NBND_REG = 7
+NBND_SUBREG = 7
+BDAREA_EPS = 1.E-8
+
+$             nreg nblk  x1 y1 z1     x2 y2 z2
+BND_VOL(,1) = 1     1,   0. 0. 0.     0. 1. 1.            $ x=0
+BND_VOL(,2) = 2     1,   1. 0. 0.     1. 1. 1.            $ x=1
+BND_VOL(,3) = 3     1,   0. 0. 0.     1. 0. 1.            $ y=0
+BND_VOL(,4) = 4     1,   0. 1. 0.     1. 1. 1.            $ y=1
+BND_VOL(,5) = 5     1,   0. 0. 0.     1. 1. 0.            $ z=0
+BND_VOL(,6) = 6     1,   0. 0. 1.     1. 1. 1.            $ z=1
+
+$ WARNING: IBC spec must always be after EBC specification
+$---------------------- Notes --------------------------------$
+$ x1,y1,z1 and x2,y2,z2 are dummy specifications for IBC
+$ The nomenclature is being preserved to allow user to specify 
+$ block number and Dirichlet or Neumann specification
+$
+$             nreg nblk  x1 y1 z1     x2 y2 z2
+$BND_VOL(,7) = 7      1,   0. 0. 1.     1. 1. 1.            $ IBC
+$BND_VOL(,8) = 8     1,   0. 0. 1.     1. 1. 1.            $ IBC
+
+$ ---------------------------------------------------------------------
+
+$ types and values for boundary regions
+
+$$$  X- FACE  $$$
+
+BOUND_TYPE(1) = 0
+HBOUND1(1) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 7.E5
+EndBlock
+HBOUND2(1) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 1.0
+EndBlock
+
+$$$  X+ FACE  $$$
+
+BOUND_TYPE(2) = 0
+HBOUND1(2) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 7.E5
+EndBlock
+HBOUND2(2) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 1.0
+EndBlock
+
+$$$  y- FACE  $$$
+
+BOUND_TYPE(3) = 0
+HBOUND1(3) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 400.0
+EndBlock
+HBOUND2(3) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 0.2
+EndBlock
+
+
+$$$  y+ FACE  $$$
+
+BOUND_TYPE(4) = 0
+HBOUND1(4) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 400.0
+EndBlock
+HBOUND2(4) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 0.2
+EndBlock
+
+$$$  z- FACE  $$$
+
+BOUND_TYPE(5) = 0  $ Neumann flux
+HBOUND1(5) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 7.E5
+EndBlock
+HBOUND2(5) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 1.0
+EndBlock
+
+$$$  z+ FACE  $$$
+
+BOUND_TYPE(6) = 0 $ Neumann flux
+HBOUND1(6) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 7.E5
+EndBlock
+HBOUND2(6) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 1.0
+EndBlock
+
+$$$  IBC FACE  $$$
+
+BOUND_TYPE(7) = 5 $ Internal B.C.
+HBOUND1(7) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 1000.
+EndBlock
+HBOUND2(7) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data 0.0 0.8
+EndBlock
+
+
+HREADIN  = TRUE
+OILCONC1() = 44.8
+OILPRES1() = 400.0
+
+$gus Added
+WATVIS = 1.0
+OILVIS = 2.0
+
+$Do not use bug in givdad.df
+$SWINIT = 0.2
+$POINIT = 1000.0
+
+OILDEN = 56.
+WATDEN = 62.34
+
+$Incompressible
+
+OILCOMP = 1.E-4
+WATCOMP = 1.E-6
+$OILCOMP = 0.
+$WATCOMP = 0.
+
+$ POROSITY
+
+POROSITY1() = .2
+
+$ Rock Compressibility
+
+CR1() = 1.E-6
+$CR1() = 0.0
+
+
+$ PERMEABILITIES
+
+$PERM_FULL is a keyword specific to MPFA
+$PERM_FULL
+XPERM1() = 500  YPERM1() = 500  ZPERM1()= 500
+$XPERM1(,8,) = 50E4  YPERM1(,8,) = 50E4 ZPERM1(,8,)= 50E4
+
+$ VISUALIZE PERMEABILITY AT INITIAL TIME
+
+$PERMOUT
+$VIS_SCL = 1                  $ Set the number of vis. scalar variables
+$VISFLAG = 8                  $ Piece-wise constant visualization output
+$VIS_FNAME = "MPFA_PERM_"     $ set the name of vis. output files
+$VIS_SCL_NAMES(1) = "TCOFY"   $ Specify the name of vis. scalar variables
+
+PCOW(1) Block        $ WATER-OIL CAPILLARY PRESSURE - zero capillary pressure
+  Interpolation Linear
+  Extrapolation Constant
+  Data
+  0. 0.,
+  1. 0.
+EndBlock
+
+Include relperm.dat
+
+$Rate spec injection and const. pressure production well
+
+$Added by Tameem:
+
+Include wells.dat
+
+$NUMWELL=2
+$
+$WELLNAME(1) = "WELL 1, BLOCK 1"
+$KINDWELL(1) = 1
+$DIAMETER(1,1) = 0.5
+$    WELLTOP(1 TO 3,1,1) =     00.     6.25     6.25
+$ WELLBOTTOM(1 TO 3,1,1) =     20.     6.25     6.25
+$WELLPQ(1) Block
+$  Interpolation Linear
+$  Extrapolation Constant 
+$  Data  0.  1000.0
+$EndBlock
+$
+$
+$WELLNAME(2) = "WELL 2, BLOCK 1"
+$KINDWELL(2) = 31
+$DIAMETER(1,2) = 0.5
+$    WELLTOP(1 TO 3,1,2) =     00.     243.75     243.75    
+$ WELLBOTTOM(1 TO 3,1,2) =     20.     243.75     243.75    
+$WELLPQ(2) Block
+$  Interpolation Linear
+$  Extrapolation Constant 
+$  Data  0.  100.0
+$EndBlock
+$
+$
+$$WELLNAME(1) = "WELL 1, BLOCK 1"
+$$KINDWELL(1) = 31
+$$DIAMETER(1,1) = 0.5
+$$    WELLTOP(1 TO 3,1,1) =      0.0000000000       6.2500000000       6.25
+$$ WELLBOTTOM(1 TO 3,1,1) =     10.0000000000        6.2500000000       6.25
+$$WELLPQ(1) Block
+$$  Interpolation Linear
+$$  Extrapolation Constant 
+$$  Data    0. 400.
+$$EndBlock
+$
+$$WELLNAME(2) = "WELL 1, BLOCK 1"
+$$KINDWELL(2) = 1
+$$DIAMETER(1,2) = 0.5
+$$    WELLTOP(1 TO 3,1,2) =      0.0000000000     95.0000000000      95.0000000000
+$$ WELLBOTTOM(1 TO 3,1,2) =     100.0000000000      95.0000000000      95.0000000000
+$$WELLPQ(2) Block
+$$  Interpolation Linear
+$$  Extrapolation Constant 
+$$  Data  0.  1000.0
+$$EndBlock
+
+$ Elastic Properties
+ 
+GRAVITY_FLAG = 1
+ 
+MODULUS1() = 1.E5  $ Young's modulus
+POISSON1() = 0.3 $ poisson's ratio
+BIOTA1() = 1.0   $ flow mechanics coupling term
+BIOTM1() = 1.E-20 $ PV change proportional to pressure change
+ROCKD1() = 2.65  $ rock density
+ 
+EBCXX1() = 1
+XXST1() = 0.0
+
+EBCXXN1() = 2
+XXDIN1() = 0.0
+
+EBCYY1() = 2
+YYDI1() = 0.0
+
+EBCYYN1() = 1
+YYSTN1() = 0.0
+
+EBCZZ1() = 2
+ZZDI1() = 0.0
+
+EBCZZN1() = 1
+ZZSTN1() = 0.0
+
+EndInitial
+
+$ TRANSIENT DATA INPUT BLOCKS
+BeginTime    0.
+DELTIM = 1.E-4  DTIMMUL = 1.5  DTIMMAX = 0.1  DTIMMIN=1.E-5
+TIMOUT = 1.    DTIMOUT = 1.
+
+$ visualization paramaters
+
+$VISOUT = 0.1   DVISOUT = 0.1
+VISOUT = 1.   DVISOUT = 1.
+VIS_SCL = 12
+VISFLAG = 8
+VIS_SCL_NAMES(1) = "PWAT"
+VIS_SCL_NAMES(2) = "COIL"
+VIS_SCL_NAMES(3) = "SWAT"
+VIS_SCL_NAMES(4) = "POIL"
+VIS_SCL_NAMES(5) = "VAX"
+VIS_SCL_NAMES(6) = "VAY"
+VIS_SCL_NAMES(7) = "VAZ"
+VIS_SCL_NAMES(8) = "DISPX"
+VIS_SCL_NAMES(9) = "DISPY"
+VIS_SCL_NAMES(10) = "DISPZ"
+VIS_SCL_NAMES(11) = "FWIDTH"
+VIS_SCL_NAMES(12) = "PROCN"
+VIS_FNAME = "MPFA_test_"
+EndTime
+

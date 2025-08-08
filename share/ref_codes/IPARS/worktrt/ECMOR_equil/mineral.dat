@@ -1,0 +1,220 @@
+TITLE(2)="TRANSPORT with SINGLE_PHASE flow"
+
+DESCRIPTION()=
+"LENGTH (FT) : 40"
+"WIDTH (FT) : 2"
+"THICKNESS (FT) : 2"
+"GRID BLOCKS : 1X20X1   20 GRID ELEMENTS"
+"DATE : 7/1/16"
+
+
+BLOCKMODEL(1) = "TRANSPORT_CHEMISTRY"
+FLOW_MODEL = "SINGLE_PHASE_IMPLICIT"
+
+$BLOCKMODEL(1) = "SINGLE_PHASE_IMPLICIT"
+
+TIMEEND = 10.
+$TIMEEND = 20.
+$TIMEEND = 10.
+$TIMEEND = 500.
+$TIMEEND = 1000.
+
+$ I/O OPTIONS
+
+$REPORT_BAL_ALL
+OUTLEVEL = 2  
+$SPLINEOUT  GEOMOUT  PROCOUT
+$WELLOUTKEY = 3   WELLFILE = "MINRL.WEL" WELLFCUM = "MINRL.CUM"
+$WELLOUTKEY = 0
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ FAULT BLOCK AND MESH DATA
+
+$$ reservoir dimensions: 2. x 40. x 2.
+NX(1) = 1   NY(1) = 20   NZ(1) = 1   DX() = 2. DY() = 2. DZ() = 2.   $ 1x20x1
+DOWN() = 0. 0. 0.
+XYZ111(,1) = 0. 0. 0.
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ FLOW MODEL SPECIFICATION AND DATA 
+
+$$$$$$$$$$$$$INITIAL CONDITIONS$$$$$$$$$$$$$$$$$$$$$$
+DINIT = 0.
+PINIT = 100.
+FLVIS = 1.
+
+STFLDEN = 56.
+
+FLCOMP = 1.E-6
+$FLCOMP = 0.
+
+
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ ROCK PROPERTIES
+
+POROSITY1() = 0.1
+
+XPERM1() = 10.  YPERM1() = 10.  ZPERM1()= 10.
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ SOLVER PARAMETERS
+
+$$$ NEWTON TOLERANCE
+$CVTOL = 1.E-6
+CVTOL = 1.E-8
+
+$$$ solver options (flow part)
+
+$ GMRES solver
+
+$GMRES_PREC = 15
+$LSOL_TOL = 1.E-5
+$N_GS_STEP = 5
+
+$ BCGS solver
+
+$LINTOL = 1.0E-05
+$LINTOL = 1.0E-08
+$MISCLINTOL = 1.0E-10
+$MISCLINTOL = 1.0E-12
+
+
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ TRANSPORT-CHEMISTRY
+
+$ NO_CFL_CHECK = FALSE  $ default is TRUE  in my working version
+$ NO_CFL_CHECK  $ default is FALSE in repo version
+
+$ OPERATOR SPLIT
+NO_DISPERSION
+
+$ UNCOMMENT BELOW TO START FULLY IMPLICIT
+NO_OPSPLIT
+TRDDLINSOL = 4 $ HYPRE
+$TRDDLINSOL = 1 $ YGMRES
+
+$NSPECIES = 4
+$N_CONC_STEPS = 5
+
+$N_RXNSTEPS = 1
+$NSPECIES = 3
+$N_CONC_STEPS = 1
+
+$====================================================================$
+$                    CHEMISTRY PARAMETERS                            $
+$====================================================================$
+
+$N_COMPONENTS = 2    N_PRODUCTS = 2
+N_COMPONENTS = 2    N_PRODUCTS = 1
+
+  EQ_PARTITIONING_COEFF(1,) =  1.0 
+
+$ COMPONENT #1 (SPECIES #1) :
+
+ NAME_SPECIES(1) =            "Ca++"
+  MOLECULAR_WEIGHT(1) =        40.0
+  PHASE_TYPE(1) =              "FLOWING"
+  COMP_CHARGE(1) =             2.0
+
+
+$ COMPONENT #2 (SPECIES #2) :
+
+  NAME_SPECIES(2) =          "CO3--"
+  MOLECULAR_WEIGHT(2) =      60.0
+  PHASE_TYPE(2) =            "FLOWING"
+  COMP_CHARGE(2) =           -2.0
+
+
+$ PRODUCT #1 (SPECIES #3) :
+
+  NAME_SPECIES(3) =            "CaCO3(aq)"
+  MOLECULAR_WEIGHT(3) =        100
+  PHASE_TYPE(3) =              "FLOWING"
+  CHEMICAL_REACTION_TYPES(1) =  "EQUILIBRIUM"
+  PK_EQUILIBRIUM(1) =           3.25042
+$  PK_EQUILIBRIUM(1) =            0.
+  STOICH(1,) = 1.0  1.0
+
+$ PRODUCT #2 (SPECIES #4)
+
+$  NAME_SPECIES(4) =            "CaCO3(s)"
+$  MOLECULAR_WEIGHT(4) =        100
+$  PHASE_TYPE(4) =              "FLOWING"
+$  CHEMICAL_REACTION_TYPES(2) =  "EQUILIBRIUM"
+$$  PK_EQUILIBRIUM(2) =           -9.3234436
+$  PK_EQUILIBRIUM(2) =          0.
+$  STOICH(2,) = 1.0  1.0 
+
+
+$ INITIAL CONDITION
+
+Ca++1(,,)  = 1.0E-2
+CO3--1(,,) = 1.0E-2
+CaCO3(aq)1(,,)=1.E-4
+$CaCO3(s)1(,,)  = 1.E-4
+
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ WELLS
+
+NUMWELL=2
+
+WELLNAME(1) = "WELL 1, BLOCK 1"
+KINDWELL(1) = 1
+WELLTOP(1 TO 3,1,1)    = 0. .5 .5 
+WELLBOTTOM(1 TO 3,1,1) = 2. .5 .5 
+WELLPQ(1) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data  0.  200.
+EndBlock
+
+$TRXWELL1(1) Block
+$  Interpolation Linear
+$  Extrapolation Constant
+$$  Data  0.  0.03121 
+$  Data  0.  1.0 
+$EndBlock
+
+$TRXWELL2(1) Block
+$  Interpolation Linear
+$  Extrapolation Constant
+$$  Data  0.  0.0
+$  Data  0.  1.0
+$EndBlock
+
+WELLNAME(2) = "WELL 2 BLOCK 1"
+KINDWELL(2) = 31
+WELLTOP(1 TO 3,1,2)    = 0. 39.5 .5
+WELLBOTTOM(1 TO 3,1,2) = 2. 39.5 .5
+WELLPQ(2) Block
+  Interpolation Linear
+  Extrapolation Constant
+   Data  0.  100.
+EndBlock
+
+EndInitial
+
+$ TRANSIENT DATA INPUT BLOCKS
+
+BeginTime    0.
+$DELTIM = 0.1  DTIMMUL = 1.001  DTIMMAX = 0.5
+DELTIM = 0.2  DTIMMUL = 1.00  DTIMMAX = 1.
+$DELTIM = 0.001  DTIMMUL = 1.001  DTIMMAX = 0.005
+TIMOUT = 1.0  DTIMOUT = 1.0 TIMRES = 10000.
+
+$ visualization paramaters
+$VISOUT = 0.1   DVISOUT = 0.1
+VISOUT = 1.0   DVISOUT = 1.0
+
+$VIS_SCL = 6
+VIS_SCL = 5
+VIS_SCL_NAMES(1) = "PWAT"
+VIS_SCL_NAMES(2) = "FLDEN"
+VIS_SCL_NAMES(3) = "Ca++"
+VIS_SCL_NAMES(4) = "CO3--"
+VIS_SCL_NAMES(5) = "CaCO3(aq)"
+$VIS_SCL_NAMES(6) = "CaCO3(s)"
+VIS_FNAME = "TTR_MINRL_"
+$VIS_DIR = "vtk"
+$VIS_BINARY = FALSE  $ default is TRUE
+VISFLAG = 7
+$VIS_DIR = "tec"
+$VISFLAG = 3
+EndTime
+

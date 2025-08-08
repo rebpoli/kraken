@@ -1,0 +1,76 @@
+subsection Optimal parameters
+  set length 1  =  0.
+  set length 2  =  0.
+end
+
+
+subsection Global parameters
+  set darcy switch                      = true
+  set Global pre-refinement steps	= 5
+  set Local pre-refinement steps  	= 4
+  set Adaptive refinement cycles        = 0
+  set Max No of timesteps  	  	= 1000
+  set Timestep size			= 0.01
+  set Timestep size to switch to = 1.0
+  set Switch timestep after steps = 0
+
+  set outer solver                      = active set
+  set test case                         = multiple homo
+  set ref strategy                      = phase field
+ 
+  set value phase field for refinement  = 0.8
+
+  # Add here to read-in the grid
+ set Output filename	    	       = 2D_Single
+end
+
+subsection Problem dependent parameters
+  set K reg				= 1e-10*h
+  set Eps reg				= 2.*h
+  # must be 0.0 in active set
+  set Gamma penalization		= 0.
+
+  # Material and problem-rhs parameters
+  set use peaceman well model		= false
+  set Pressure				= 0.
+  set Fracture toughness G_c		= 1.0
+  set Density solid	 		= 1.0
+  set Poisson ratio nu			= 0.2
+  set E modulus	    			= 1.0e+8
+  set alpha time                        = 0.0
+
+  set pressure diff x1                  = 0.2
+  set pressure diff x2                  = 0.8
+
+  #alpha_biot = 1: 5.0e-5 (Sneddon)
+  #alpha_biot = 0: 5.0e-12 (Sneddon)
+  #
+  set pressure wellbore                 = 2.5
+  set alpha Biot coefficient		= 1.0
+  set M Biot   				= 1.0e+8
+  set Compressibility Fracture		= 1.0e-8
+
+  set Viscosity Reservoir		= 1.0e-3
+  set Viscosity Fracture		= 1.0e-3
+
+  set Permeability Reservoir		= 1.0e-12
+  set Density Reservoir			= 1.0
+
+  # 1e-1 seems low but corresponds to the relative
+  #  tolerance
+  set tol fixed stress                  = 1.0e-2
+  set tol fixed stress two		= 1.0e-2
+
+end 
+
+subsection Solver parameters
+  set Use Direct Inner Solver		   = false
+  set Newton lower bound     		   = 1.0e-8
+  set Newton lower bound pressure	   = 1.0e-16
+  set Newton maximum steps		   = 50
+  set Upper Newton rho			   = 0.999
+  set Line search maximum steps            = 10
+  set Line search damping 		   = 0.5
+  set Decompose stress in rhs		   = 0.0
+  set Decompose stress in matrix	   = 0.0
+end

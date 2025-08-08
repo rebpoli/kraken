@@ -1,0 +1,109 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  2.2.0                                 |
+|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0 0 0);
+
+boundaryField
+{
+    inlet
+    {
+        type            codedFixedValue;
+        value           uniform (0 0 0);
+	
+	redirectType    perforationInletProfile;
+	code
+	#{
+	    Info << "define inlet velocity profile" << endl;
+	    // get patch
+	    const fvPatch& boundaryPatch = patch();
+	    // get coordinates of face centers
+	    const vectorField& Cf = boundaryPatch.Cf();
+	    // get surface area of inlet bounary faces
+	    const scalarField& Sf = boundaryPatch.magSf();
+	    vectorField& field = *this;
+	    
+	    // define the x coordinate of upper perforation location
+	    const scalar upperPerf = 3.0;
+	    // define the x coordinate of lower perforation location
+	    const scalar lowerPerf = -3.0;
+	    // define the volumetric injection rate
+	    const scalar volumetricRate = 6.0;
+	    // initialize perforation area variable
+	    scalar perfArea = 0.0;
+
+	    // loop over inlet bounary faces to calculate perfArea
+	    forAll(Cf,faceI)
+	    {
+	      // get x coordinate of inlet faces
+	      const scalar x = Cf[faceI].x();
+	      if (x > lowerPerf && x < upperPerf)
+	      {
+		// if one face is within the perforation area
+		// add face area to total perforation area
+		perfArea += Sf[faceI];
+	      }
+	    }
+	    // sum up perfArea over all processors
+	    reduce(perfArea, sumOp<double>());
+	    //Info << "perfArea = " << perfArea << endl;
+	    // calculate inlet velocity
+	    const scalar inletVelocity = volumetricRate/perfArea;
+	    Info << "inlet velocity = " << inletVelocity << endl;
+	    // loop over all the patch faces
+	    forAll(Cf, faceI)
+	    {
+	      const scalar x = Cf[faceI].x();
+	   	      	      	      
+	      if (x > lowerPerf && x < upperPerf)
+	      {
+		// if one face is within perforation area
+		// set the face velocity to be inlet velocity
+		field[faceI] = vector(0, 0, inletVelocity);
+	      }
+	      else
+	      {
+		field[faceI] = vector(0, 0, 0);
+	      }
+	    }
+	#};
+    }
+
+    outlet
+    {
+        type zeroGradient;
+    }
+
+    walls
+    {
+        type            fixedValue;
+        value           uniform (0 0 0);
+    }
+
+    periodicx1
+    {
+        type            cyclic;
+    }
+
+    periodicx2
+    {
+        type            cyclic;
+    }
+
+}
+
+// ************************************************************************* //

@@ -1,0 +1,76 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  2.2.0                                 |
+|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      C;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 0 0 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        type            codedMixed;
+        value           uniform 1.0;
+        refValue        uniform 0;
+        refGradient     uniform 0;
+        valueFraction   uniform 1;
+        name            codedDanckwerts;
+        codeInclude
+        #{
+            #include "addToRunTimeSelectionTable.H"
+        #};
+        code
+        #{
+            #include "../../constant/bcInclude/danckwerts.H"
+        #};
+    }
+
+    outlet
+    {
+        type            zeroGradient;
+    }
+
+    walls
+    {
+        type            codedMixed;
+        value           uniform 0.0;
+        refValue        uniform 0;
+        refGradient     uniform 0;
+        valueFraction   uniform 1;
+        name    codedlinear;
+        codeInclude
+        #{
+            #include "addToRunTimeSelectionTable.H"
+        #};
+        code
+        #{
+            #include "../../constant/bcInclude/linear.H"
+        #};
+
+    }
+
+    periodicx1
+    {
+        type            cyclic;
+    }
+    periodicx2
+    {
+        type            cyclic;
+    }
+
+}
+
+// ************************************************************************* //

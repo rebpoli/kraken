@@ -1,0 +1,58 @@
+# Listing of Parameters
+# ---------------------
+subsection DG Parameters
+  # The penalty parameter for enforcing Dirichlet boundary conditions in DG
+  set Boundary Term Penalty = 1.0e+10
+
+  # The penalty parameter for face terms in DG
+  set Face Term Penalty     = 1.0e+14
+
+  # The sform determines which class of DG method will be used(-1:SIPG,
+  # 0:IIPG, +1:NIPG
+  set sform                 = 0
+end
+
+
+subsection Elasticity Parameters
+  # The elastic energy restitution rate for crack growth [N/mm]
+  set Critical Fracture Energy = 2.7
+
+  # Lame's First Parameter [MPa]
+  set Lame's Parameter Lambda  = 121.15e+3
+
+  # Lame's Second Parameter a.k.a Shear Modulus [MPa]
+  set Lame's Parameter Mu      = 80.77e+3
+end
+
+
+subsection Phase-Field Parameters
+  set Linearization Scheme = simple
+
+  # Space regularization constant Epsilon [mm]
+  set Constant E                 = 4.4e-2
+
+  # Energy regularization constant Kappa
+  set Constant K                 = 1e-12
+
+  # Maximum allowable augmented lagrange iterations at a given timestep
+  set Maximum Penalty Iterations = 350
+
+  # Constant penalty term from Augmented Lagrange method
+  set Penalty Gamma              = 1e-14
+end
+
+
+subsection Runtime Parameters
+  set Decompose Stress Matrix = false
+  set Decompose Stress RHS = false
+  set Optimization Type = simple penalization
+  #set Optimization Type = augmented lagrange
+  # Input Mesh File
+  set Test Case = miehe tension
+  
+  # Number of timesteps to take
+  set Maximum Timesteps = 2
+
+  # Timestep size [s]
+  set Timestep Size     = 1e-4
+end

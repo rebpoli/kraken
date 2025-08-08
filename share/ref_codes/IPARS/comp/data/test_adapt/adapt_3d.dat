@@ -1,0 +1,419 @@
+TITLE(1)="Compositional model with semi-structured evfem"
+
+DESCRIPTION()=
+"Grid adaptivity test in 3D"
+"Ben Ganis"
+"5/1/2017"
+
+BLOCKMODEL(1)="COMPOSITIONAL_MODEL"
+BLOCKMODEL(2)="COMPOSITIONAL_MODEL"
+BLOCKMODEL(3)="COMPOSITIONAL_MODEL"
+BLOCKMODEL(4)="COMPOSITIONAL_MODEL"
+
+$TIMEEND = 0.001
+$TIMEEND = 0.01
+$TIMEEND = 0.2
+$TIMEEND = 1.
+$TIMEEND = 5.
+TIMEEND = 20.0
+$TIMEEND = 80.0
+
+$ I/O OPTIONS
+$ DEBUGS  
+$ DEBUGM
+$ OUTLEVEL = 2
+$ BUGKEY(6)
+$ BUGKEY(10)
+$PROCOUT
+$EXTRA_TIMING
+$WELLOUTKEY = 3  WELLFILE = "WELLS.WEL"  WELLFCUM = "CUMULATIVE.WEL"
+
+MAXNEWT=10
+
+$ Use fully coupled enhanced velocity solver
+LSOL_TOL=1.E-9
+LSOL_ITMAX=100
+HYPRE_EVFEM
+
+$ Inherit processor grid assignment from fault block 1
+EV_PRCBLK=1
+
+$ NO DISPERSION
+XNO_DIFFDISP
+$XMOL_DIFF(,,) = 100.
+
+$ Adaptivity options
+ADAPTIVITY
+ADAPT_MODE = 3
+ADAPT_VARS = 1
+ADAPT_VAR(1) = "SWAT"  ADAPT_TOL(1) = 0.05
+$ADAPT_VAR(2) = "PRES"  ADAPT_TOL(2) = 10.
+NDIMA = 3
+NSTRIDE = 2
+
+$----- INCLUDE CORNER POINT MESH DATA
+BLOCKNAME(1) = "BLOCK 1"
+DOWN(1 TO 3,1) = 1. 0. 0.
+XYZ111(,1)= 8000. 0. 0.
+NX(1)=2  NY(1)=20  NZ(1)=20
+DX(,1)=10. DY(,1)=80. DZ(,1)=80.
+KEYOUT1()=1
+
+BLOCKNAME(2) = "BLOCK 2"
+DOWN(1 TO 3,2) = 1. 0. 0.
+XYZ111(,2)= 8000. 0. 0.
+NX(2)=4  NY(2)=40  NZ(2)=40
+DX(,2)=5. DY(,2)=40. DZ(,2)=40.
+KEYOUT2()=1
+
+BLOCKNAME(3) = "BLOCK 3"
+DOWN(1 TO 3,3) = 1. 0. 0.
+XYZ111(,3)= 8000. 0. 0.
+NX(3)=8  NY(3)=80  NZ(3)=80
+DX(,3)=2.5 DY(,3)=20. DZ(,3)=20.
+KEYOUT3()=1
+
+BLOCKNAME(4) = "BLOCK 4"
+DOWN(1 TO 3,4) = 1. 0. 0.
+XYZ111(,4)= 8000. 0. 0.
+NX(4)=16  NY(4)=160  NZ(4)=160
+DX(,4)=1.25 DY(,4)=10. DZ(,4)=10.
+KEYOUT4()=1
+
+FACEBLOCKS(,1) = 1 2  FACEXYZ(,1) = 0. 0. 0., 0. 0. 0.
+FACEBLOCKS(,2) = 1 3  FACEXYZ(,2) = 0. 0. 0., 0. 0. 0.
+FACEBLOCKS(,3) = 1 4  FACEXYZ(,3) = 0. 0. 0., 0. 0. 0.
+FACEBLOCKS(,4) = 2 3  FACEXYZ(,4) = 0. 0. 0., 0. 0. 0.
+FACEBLOCKS(,5) = 2 4  FACEXYZ(,5) = 0. 0. 0., 0. 0. 0.
+FACEBLOCKS(,6) = 3 4  FACEXYZ(,6) = 0. 0. 0., 0. 0. 0.
+
+$ WATER PROPERTIES
+WATERP = 0.0
+WATFVF = 1.0
+WATVIS = .7
+WATCMP = 3.3E-6
+STDENW = 62.4
+
+$ COMP NAMES
+NHCOMP = 6
+COMP(1) = "C1"  COMP(2) = "C3"  COMP(3) = "C6"  COMP(4) = "C10"
+COMP(5) = "C15"  COMP(6) = "C20"  
+
+$ CRITICAL TEMPERATURES
+TCRIT()  343.0  665.7  913.4  1111.8  1270.0  1380.0
+
+$ CRITICAL PRESSURES
+PCRIT()  667.8  616.3  436.9  304.0  200.0  162.0 
+
+$ CRITICAL VOLUMES
+ZCRIT() .290  .277  .264  .257  .245  .235
+
+$ ACENTRIC FACTORS
+ACENT()  .0130  .1524  .3007  .4885  .6500  .8500
+
+$ MOL WEIGHTS
+MOLWT()  16.04  44.10  86.18  142.29  206.00  282.00
+
+$ VOLUMETRIC SHIFT
+VSHIFT() 6*0.0
+
+$ BINARY INTERACTION COEFFICIENTS
+BINACT(1,5) = .05
+BINACT(5,1) = .05
+BINACT(1,6) = .05
+BINACT(6,1) = .05
+BINACT(2,5) = .005
+BINACT(5,2) = .005
+BINACT(2,6) = .005
+BINACT(6,2) = .005
+
+MODREL(1) = 2
+
+$ SURFACE CONDITIONS 
+TSURF = 60.0  PSURF = 14.7
+
+$ INITIAL CONDITIONS
+
+PORPRES1() = 2000.0
+SWINIT1() = 0.20
+PRES1(,,) = 2000.0
+CONC1(,,,1) = .0
+CONC1(,,,2) = .0
+CONC1(,,,3) = .6
+CONC1(,,,4) = .0
+CONC1(,,,5) = .0
+CONC1(,,,6) = .4
+
+PORPRES2() = 2000.0
+SWINIT2() = 0.20
+PRES2(,,) = 2000.0
+CONC2(,,,1) = .0
+CONC2(,,,2) = .0
+CONC2(,,,3) = .6
+CONC2(,,,4) = .0
+CONC2(,,,5) = .0
+CONC2(,,,6) = .4
+
+PORPRES3() = 2000.0
+SWINIT3() = 0.20
+PRES3(,,) = 2000.0
+CONC3(,,,1) = .0
+CONC3(,,,2) = .0
+CONC3(,,,3) = .6
+CONC3(,,,4) = .0
+CONC3(,,,5) = .0
+CONC3(,,,6) = .4
+
+PORPRES4() = 2000.0
+SWINIT4() = 0.20
+PRES4(,,) = 2000.0
+CONC4(,,,1) = .0
+CONC4(,,,2) = .0
+CONC4(,,,3) = .6
+CONC4(,,,4) = .0
+CONC4(,,,5) = .0
+CONC4(,,,6) = .4
+
+$ INITIAL TEMPERATURES
+TEMPR1() = 160.
+TEMPR2() = 160.
+TEMPR3() = 160.
+TEMPR4() = 160.
+
+$ SEPARATORS
+PSEP(,1) = 14.7
+TSEP(,1) = 60.
+
+$ SEPARATOR ASSIGNMENT FOR IN-PLACE CALCULATIONS
+SEPSURF = 1
+
+$ POROSITY AND PERM
+CR1() = 5.E-6
+POROSITY1() = .30
+XPERM1()=50.
+
+CR2() = 5.E-6
+POROSITY2() = .30
+XPERM2()=50.
+
+CR3() = 5.E-6
+POROSITY3() = .30
+XPERM3()=50.
+
+CR4() = 5.E-6
+POROSITY4() = .30
+XPERM4()=50.
+
+$Tolerances
+
+$TESTALL
+$NEGFLASH
+TOL_FLASH 1.E-10
+TOL_RR 1.E-12
+TOL_TRIV 1.E-4
+
+KOSW(1) Block      $ OIL RELATIVE PERMEABILITY VS Sw - ROCK TYPES 1
+  Interpolation Linear
+  Extrapolation Constant
+
+Data    0.2       1.0       
+        0.2899    0.6769   
+        0.3778    0.4153   
+        0.4667    0.2178   
+        0.5556    0.0835   
+        0.6444    0.0123   
+        0.7000    0.0   
+        0.7333    0.0   
+        0.8222    0.0   
+        0.9111    0.0   
+        1.0       0.0   
+EndBlock
+
+KWSW(1) Block     $ WATER RELATIVE PERMEABILITY VS Sw - ROCK TYPES 1
+  Interpolation Linear
+  Extrapolation  Constant
+
+Data    0.2       0.0       
+        0.2899    0.0022   
+        0.3778    0.0180  
+        0.4667    0.0607   
+        0.5556    0.1438   
+        0.6444    0.2809   
+        0.7000    0.4089   
+        0.7333    0.4855   
+        0.8222    0.7709   
+        0.9111    1.0   
+        1.0       1.0   
+EndBlock
+
+KOSG(1) Block     $ OIL RELATIVE PERMEABILITY VS Sg - ROCK TYPES 1
+  Interpolation Linear
+  Extrapolation  Constant
+
+Data    0.0       1.0   
+        0.0500    0.8800  
+        0.0889    0.7023   
+        0.1778    0.4705   
+        0.2667    0.2963   
+        0.3556    0.1715   
+        0.4444    0.0878   
+        0.5333    0.0370   
+        0.6222    0.0110   
+        0.6500    0.0   
+        0.7111    0.0   
+        0.8       0.0       
+EndBlock
+
+KGSG(1) Block      $ GAS RELATIVE PERMEABILITY VS Sg - ROCK TYPES 1
+  Interpolation Linear
+  Extrapolation  Constant
+
+Data    0.0       0.0   
+        0.0500    0.0  
+        0.0889    0.0010   
+        0.1778    0.0100   
+        0.2667    0.0300   
+        0.3556    0.0500   
+        0.4444    0.1000   
+        0.5333    0.2000   
+        0.6222    0.3500  
+        0.6500    0.3900   
+        0.7111    0.5600   
+        0.8       1.0       
+EndBlock
+
+PCOW(1) Block        $ WATER-OIL CAPILLARY PRESSURE - ROCK TYPE 1
+  Interpolation Linear
+  Extrapolation  Constant
+
+Data    0.2       45.0       
+        0.2899    19.03   
+        0.3778    10.07   
+        0.4667     4.90   
+        0.5556     1.80   
+        0.6444     0.50  
+        0.7000     0.05   
+        0.7333     0.01   
+        0.8222     0.0   
+        0.9111     0.0   
+        1.0        0.0 
+EndBlock
+
+PCGO(1) Block        $ GAS-OIL CAPILLARY PRESSURE - ROCK TYPE 1
+  Interpolation Linear
+  Extrapolation  Constant
+
+Data    0.2       30.0       
+        0.2889     8.000   
+        0.3500     4.000   
+        0.3778     3.000  
+        0.4667     0.800   
+        0.5556     0.030  
+        0.6444     0.001  
+        0.7333     0.001   
+        0.8222     0.0   
+        0.9111     0.0   
+        0.9500     0.0  
+        1.0        0.0   
+EndBlock
+
+NUMWELL=5
+
+WELLNAME(1) = "WELL 1"
+KINDWELL(1) = 31
+WELLBLOCK(1,1) = 4
+WELLTOP(1 TO 3,1,1) =     8000.      797.5      797.5
+WELLBOTTOM(1 TO 3,1,1) =     8125.      797.5      797.5
+WELLPQ(1) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data        0.     2000.
+EndBlock
+
+WELLNAME(2) = "WELL 2"
+KINDWELL(2) = 1
+WELLBLOCK(1,2) = 4
+WELLTOP(1 TO 3,1,2) =     8000.      397.5      397.5
+WELLBOTTOM(1 TO 3,1,2) =     8125.      397.5      397.5
+WELLPQ(2) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data        0.     4000.
+EndBlock
+
+WELLNAME(3) = "WELL 3"
+KINDWELL(3) = 1
+WELLBLOCK(1,3) = 4
+WELLTOP(1 TO 3,1,3) =     8000.      397.5     1202.5
+WELLBOTTOM(1 TO 3,1,3) =     8125.      397.5     1202.5
+WELLPQ(3) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data        0.     4000.
+EndBlock
+
+WELLNAME(4) = "WELL 4"
+KINDWELL(4) = 1
+WELLBLOCK(1,4) = 4
+WELLTOP(1 TO 3,1,4) =     8000.     1202.5     1202.5
+WELLBOTTOM(1 TO 3,1,4) =     8125.     1202.5     1202.5
+WELLPQ(4) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data        0.     4000.
+EndBlock
+
+WELLNAME(5) = "WELL 5"
+KINDWELL(5) = 1
+WELLBLOCK(1,5) = 4
+WELLTOP(1 TO 3,1,5) =     8000.     1202.5      397.5
+WELLBOTTOM(1 TO 3,1,5) =     8125.     1202.5      397.5
+WELLPQ(5) Block
+  Interpolation Linear
+  Extrapolation Constant
+  Data        0.     4000.
+EndBlock
+
+   VIS_FNAME = "Vis_"
+   VISFLAG = 9
+   VIS_SCL = 11
+   VIS_SCL_NAMES(1) = "PRES"
+   VIS_SCL_NAMES(2) = "SWAT"
+   VIS_SCL_NAMES(3) = "SOIL"
+   VIS_SCL_NAMES(4) = "SGAS"
+   VIS_SCL_NAMES(5) = "C1"
+   VIS_SCL_NAMES(6) = "C3"
+   VIS_SCL_NAMES(7) = "C6"
+   VIS_SCL_NAMES(8) = "C10"
+   VIS_SCL_NAMES(9) = "C15"
+   VIS_SCL_NAMES(10) = "C20"
+   VIS_SCL_NAMES(11) = "MARK"
+$   VIS_BINARY = FALSE
+
+EndInitial
+
+$ TRANSIENT DATA INPUT BLOCKS
+
+BeginTime    0.0
+$   DELTIM = 0.0001  DTIMMUL = 1.0
+   DELTIM = 0.01  DTIMMUL = 1.1
+   DTIMMIN = 0.00001  DTIMMAX = 0.2
+   DTIMOUT = 10.
+   DSMAX 1.0
+
+$   $ INJECTION COMPOSITION
+   COMPINJ(,1) = 0.0 0.0 0.99 0.01 0.0 0.0 0.0
+   INJCOMP() = 1
+
+   $ SEPARATOR ASSIGNMENT FOR WELLS
+   IWSEP() = 1
+
+$   VISALL
+$   VISNEWT
+   VISOUT = 0.1  DVISOUT = 0.1
+$   VISOUT = 10.  DVISOUT = 10.
+
+  ICFL=0
+
+EndTime
+

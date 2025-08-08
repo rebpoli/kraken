@@ -1,0 +1,6 @@
+rm CMakeCache.txt
+
+cmake -DDEAL_II_DIR=/Users/lee/Utils/dealII.9.1.1/
+
+make release
+make 

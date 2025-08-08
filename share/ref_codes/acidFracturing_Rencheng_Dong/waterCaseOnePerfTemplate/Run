@@ -1,0 +1,53 @@
+#!/bin/sh
+cd ${0%/*} || exit 1            # run script
+
+#  Parse input params for processors (Nx X Ny)
+Nx=1
+Ny=1
+N=1
+if [ $# -eq 1 ]; then
+    Nx=$1
+    N=$Nx
+elif [ $# -eq 2 ]; then
+    Nx=$1
+    Ny=$2
+    N="$((Nx * Ny))"
+fi
+echo "Nx, Ny, N: $Nx $Ny $N"
+
+if [ ! -d "0" ]; then  # create starting directory
+    cp -rp Zero 0
+fi
+
+#  Run selection
+if [ $N -eq 1 ]; then
+
+    echo "Running in serial"
+    acidFracturing_Rencheng_Dong 2>&1 | tee log.acidFracturing_Rencheng_Dong
+
+else
+
+    echo "Running in parallel with $N processors"
+    if [ ! -d "processor0" ]; then
+        cat system/decomposeParDict.template \
+            | sed "/NX/s//$Nx/" | sed "/NY/s//$Ny/" \
+            | sed "/N/s//$N/" > system/decomposeParDict
+        decomposePar -copyUniform
+    fi
+
+    if [ -e hosts ]; then
+        mpirun -np $N -hostfile hosts acidFracturing_Rencheng_Dong -parallel 2>&1 \
+            | tee log.acidFracturing_Rencheng_Dong
+    else
+        mpirun -np $N acidFracturing_Rencheng_Dong -parallel 2>&1 | tee log.acidFracturing_Rencheng_Dong
+    fi
+
+    diff 0/p Zero/p > /dev/null 2>&1 
+    if [ $? == 0 ]; then
+        reconstructPar -withZero
+    else
+        reconstructPar -newTimes
+    fi
+fi
+
+# ------------------------------------------------------------------- #

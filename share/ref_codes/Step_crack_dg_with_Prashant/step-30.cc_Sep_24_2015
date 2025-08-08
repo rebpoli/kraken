@@ -1,0 +1,2552 @@
+/**
+  This code is licensed under the "GNU GPL version 2 or later". See
+  license.txt or https://www.gnu.org/licenses/gpl-2.0.html
+
+  Copyright 2012-2014: Thomas Wick
+*/
+
+// Changes:
+// Aug 29, 2014: DG for u and phi
+//               pf_extra now with extrapolation
+//               Code cleaning: get_solution_and_timestep_data
+
+// General literature on DG elasticity
+// DG: Lit Biot: Ruijie: p. 124 ff
+// Several papers by Ruijie Liu with Mary
+
+// This program (is based on deal.II step-30)
+// Phase-field crack propagation in elasticity
+// The specific example is the single edge notched tension
+// test (see Miehe et al. 2010a,b)
+
+// A TODO list can be found at the end
+
+#include <base/quadrature_lib.h>
+#include <base/function.h>
+#include <base/utilities.h>
+
+#include <lac/vector.h>
+#include <lac/sparse_matrix.h>
+#include <lac/constraint_matrix.h>
+#include <lac/block_sparse_matrix.h>
+#include <lac/sparse_direct.h>
+
+#include <grid/tria.h>
+#include <grid/grid_generator.h>
+#include <grid/grid_out.h>
+#include <grid/grid_refinement.h>
+#include <grid/tria_accessor.h>
+#include <grid/tria_iterator.h>
+#include <grid/tria_boundary_lib.h>
+#include <grid/grid_in.h>
+#include <grid/grid_tools.h>
+
+#include <fe/fe_values.h>
+#include <fe/fe_system.h>
+#include <fe/mapping_q1.h>
+#include <fe/fe_dgq.h>
+#include <fe/fe_dgp.h>
+#include <fe/fe_q.h>
+
+#include <dofs/dof_handler.h>
+#include <dofs/dof_accessor.h>
+#include <dofs/dof_tools.h>
+#include <dofs/dof_renumbering.h>
+
+#include <numerics/data_out.h>
+#include <numerics/solution_transfer.h>
+#include <numerics/vector_tools.h>
+#include <numerics/matrix_tools.h>
+
+#include <base/timer.h>
+
+#include <iostream>
+#include <fstream>
+#include <algorithm>
+
+#include "input_handler.h"
+
+using namespace dealii;
+
+//-----------------------------------------------------------------------------
+// Enumeration to specify which case to run
+enum class TestCase {
+    none,
+    miehe_tension,
+    miehe_shear,
+    symmetric_bending
+};
+
+//-----------------------------------------------------------------------------
+// Enumeration to specify type of interpolation for pf_extra
+enum class LinearizationScheme {
+    none,
+    simple,
+    interpolation
+};
+
+//-----------------------------------------------------------------------------
+// Enumeration to specify type of outer-loop optimization
+enum class OptimizationType {
+    none,
+    simple,
+    auglag
+};
+
+//-----------------------------------------------------------------------------
+// Functions for spectral decomposition of stresses
+template <int dim>
+void eigen_vectors_and_values(
+  double &E_eigenvalue_1, double &E_eigenvalue_2,
+  Tensor<2,dim> &ev_matrix,
+  const Tensor<2,dim> &matrix)
+{
+  double sq = std::sqrt((matrix[0][0] - matrix[1][1]) * (matrix[0][0] - matrix[1][1]) + 4.0*matrix[0][1]*matrix[1][0]);
+  E_eigenvalue_1 = 0.5 * ((matrix[0][0] + matrix[1][1]) + sq);
+  E_eigenvalue_2 = 0.5 * ((matrix[0][0] + matrix[1][1]) - sq);
+
+  // Compute eigenvectors
+  Tensor<1,dim> E_eigenvector_1;
+  Tensor<1,dim> E_eigenvector_2;
+  if (std::abs(matrix[0][1]) < 1e-10*std::abs(matrix[0][0]))
+    {
+      // E is close to diagonal
+      E_eigenvector_1[0]=0;
+      E_eigenvector_1[1]=1;
+      E_eigenvector_2[0]=1;
+      E_eigenvector_2[1]=0;
+    }
+  else
+    {
+      E_eigenvector_1[0] = 1.0/(std::sqrt(1 + (E_eigenvalue_1 - matrix[0][0])/matrix[0][1] * (E_eigenvalue_1 - matrix[0][0])/matrix[0][1]));
+      E_eigenvector_1[1] = (E_eigenvalue_1 - matrix[0][0])/(matrix[0][1] * (std::sqrt(1 + (E_eigenvalue_1 - matrix[0][0])/matrix[0][1] * (E_eigenvalue_1 - matrix[0][0])/matrix[0][1])));
+      E_eigenvector_2[0] = 1.0/(std::sqrt(1 + (E_eigenvalue_2 - matrix[0][0])/matrix[0][1] * (E_eigenvalue_2 - matrix[0][0])/matrix[0][1]));
+      E_eigenvector_2[1] = (E_eigenvalue_2 - matrix[0][0])/(matrix[0][1] * (std::sqrt(1 + (E_eigenvalue_2 - matrix[0][0])/matrix[0][1] * (E_eigenvalue_2 - matrix[0][0])/matrix[0][1])));
+    }
+
+  ev_matrix[0][0] = E_eigenvector_1[0];
+  ev_matrix[0][1] = E_eigenvector_2[0];
+  ev_matrix[1][0] = E_eigenvector_1[1];
+  ev_matrix[1][1] = E_eigenvector_2[1];
+
+  // Sanity check if orthogonal
+  double scalar_prod = 1.0e+10;
+  scalar_prod = E_eigenvector_1[0] * E_eigenvector_2[0] + E_eigenvector_1[1] * E_eigenvector_2[1];
+
+  if (scalar_prod > 1.0e-6)
+    {
+      std::cout << "Seems not to be orthogonal" << std::endl;
+      abort();
+    }
+}
+
+
+template <int dim>
+void decompose_stress(
+        Tensor<2,dim> &stress_term_plus,
+        Tensor<2,dim> &stress_term_minus,
+        const Tensor<2, dim> &E,
+        const double tr_E,
+        const Tensor<2, dim> &E_LinU,
+        const double tr_E_LinU,
+        const double lame_coefficient_lambda,
+        const double lame_coefficient_mu,
+        const bool derivative)
+{
+    static Tensor<2, dim> Identity;
+    Identity[0][0] = 1;
+    Identity[0][1] = 0;
+    Identity[1][0] = 0;
+    Identity[1][1] = 1;
+
+    Tensor<2, dim> zero_matrix;
+    zero_matrix.clear();
+
+    // Compute first the eigenvalues for u (as in the previous function)
+    // and then for \delta u
+
+    // Compute eigenvalues/vectors
+    double E_eigenvalue_1, E_eigenvalue_2;
+    Tensor<2,dim> P_matrix;
+    eigen_vectors_and_values(E_eigenvalue_1, E_eigenvalue_2,P_matrix,E);
+
+    double E_eigenvalue_1_plus = std::max(0.0, E_eigenvalue_1);
+    double E_eigenvalue_2_plus = std::max(0.0, E_eigenvalue_2);
+
+    Tensor<2,dim> Lambda_plus;
+    Lambda_plus[0][0] = E_eigenvalue_1_plus;
+    Lambda_plus[0][1] = 0.0;
+    Lambda_plus[1][0] = 0.0;
+    Lambda_plus[1][1] = E_eigenvalue_2_plus;
+
+    if (!derivative)
+    {
+        Tensor<2,dim> E_plus = P_matrix * Lambda_plus * transpose(P_matrix);
+
+        double tr_E_positive = std::max(0.0, tr_E);
+
+        stress_term_plus = lame_coefficient_lambda * tr_E_positive * Identity
+            + 2 * lame_coefficient_mu * E_plus;
+
+        stress_term_minus = lame_coefficient_lambda * (tr_E - tr_E_positive) * Identity
+            + 2 * lame_coefficient_mu * (E - E_plus);
+    } else
+    {
+        // Derviatives (\delta u)
+        // Compute eigenvalues/vectors
+        double E_eigenvalue_1_LinU, E_eigenvalue_2_LinU;
+        Tensor<1,dim> E_eigenvector_1_LinU;
+        Tensor<1,dim> E_eigenvector_2_LinU;
+        Tensor<2,dim> P_matrix_LinU;
+
+        // Compute linearized Eigenvalues
+        double diskriminante = std::sqrt(E[0][1] * E[1][0] + (E[0][0] - E[1][1]) * (E[0][0] - E[1][1])/4.0);
+
+        E_eigenvalue_1_LinU = 0.5 * tr_E_LinU + 1.0/(2.0 * diskriminante) *
+            (E_LinU[0][1] * E[1][0] + E[0][1] * E_LinU[1][0] + (E[0][0] - E[1][1])*(E_LinU[0][0] - E_LinU[1][1])/2.0);
+
+        E_eigenvalue_2_LinU = 0.5 * tr_E_LinU - 1.0/(2.0 * diskriminante) *
+            (E_LinU[0][1] * E[1][0] + E[0][1] * E_LinU[1][0] + (E[0][0] - E[1][1])*(E_LinU[0][0] - E_LinU[1][1])/2.0);
+
+        // Compute normalized Eigenvectors and P
+        double normalization_1 = 1.0/(std::sqrt(1 + (E_eigenvalue_1 - E[0][0])/E[0][1] * (E_eigenvalue_1 - E[0][0])/E[0][1]));
+        double normalization_2 = 1.0/(std::sqrt(1 + (E_eigenvalue_2 - E[0][0])/E[0][1] * (E_eigenvalue_2 - E[0][0])/E[0][1]));
+
+        double normalization_1_LinU = 0.0;
+        double normalization_2_LinU = 0.0;
+
+        normalization_1_LinU = -1.0 * (1.0/(1.0 + (E_eigenvalue_1 - E[0][0])/E[0][1] * (E_eigenvalue_1 - E[0][0])/E[0][1])
+                                     * 1.0/(2.0 * std::sqrt(1.0 + (E_eigenvalue_1 - E[0][0])/E[0][1] * (E_eigenvalue_1 - E[0][0])/E[0][1]))
+                                     * (2.0 * (E_eigenvalue_1 - E[0][0])/E[0][1])
+                                     * ((E_eigenvalue_1_LinU - E_LinU[0][0]) * E[0][1] - (E_eigenvalue_1 - E[0][0]) * E_LinU[0][1])/(E[0][1] * E[0][1]));
+
+        normalization_2_LinU = -1.0 * (1.0/(1.0 + (E_eigenvalue_2 - E[0][0])/E[0][1] * (E_eigenvalue_2 - E[0][0])/E[0][1])
+                                     * 1.0/(2.0 * std::sqrt(1.0 + (E_eigenvalue_2 - E[0][0])/E[0][1] * (E_eigenvalue_2 - E[0][0])/E[0][1]))
+                                     * (2.0 * (E_eigenvalue_2 - E[0][0])/E[0][1])
+                                     * ((E_eigenvalue_2_LinU - E_LinU[0][0]) * E[0][1] - (E_eigenvalue_2 - E[0][0]) * E_LinU[0][1])/(E[0][1] * E[0][1]));
+
+
+        E_eigenvector_1_LinU[0] = normalization_1 * 1.0;
+        E_eigenvector_1_LinU[1] = normalization_1 * (E_eigenvalue_1 - E[0][0])/E[0][1];
+
+        E_eigenvector_2_LinU[0] = normalization_2 * 1.0;
+        E_eigenvector_2_LinU[1] = normalization_2 * (E_eigenvalue_2 - E[0][0])/E[0][1];
+
+        // Apply product rule to normalization and vector entries
+        double EV_1_part_1_comp_1 = 0.0;  // LinU in vector entries, normalization U
+        double EV_1_part_1_comp_2 = 0.0;  // LinU in vector entries, normalization U
+        double EV_1_part_2_comp_1 = 0.0;  // vector entries U, normalization LinU
+        double EV_1_part_2_comp_2 = 0.0;  // vector entries U, normalization LinU
+
+        double EV_2_part_1_comp_1 = 0.0;  // LinU in vector entries, normalization U
+        double EV_2_part_1_comp_2 = 0.0;  // LinU in vector entries, normalization U
+        double EV_2_part_2_comp_1 = 0.0;  // vector entries U, normalization LinU
+        double EV_2_part_2_comp_2 = 0.0;  // vector entries U, normalization LinU
+
+        // Effizienter spaeter, aber erst einmal uebersichtlich und verstehen!
+        EV_1_part_1_comp_1 = normalization_1 * 0.0;
+        EV_1_part_1_comp_2 = normalization_1 *
+            ((E_eigenvalue_1_LinU - E_LinU[0][0]) * E[0][1] - (E_eigenvalue_1 - E[0][0]) * E_LinU[0][1])/(E[0][1] * E[0][1]);
+
+        EV_1_part_2_comp_1 = normalization_1_LinU * 1.0;
+        EV_1_part_2_comp_2 = normalization_1_LinU * (E_eigenvalue_1 - E[0][0])/E[0][1];
+
+
+        EV_2_part_1_comp_1 = normalization_2 * 0.0;
+        EV_2_part_1_comp_2 = normalization_2 *
+            ((E_eigenvalue_2_LinU - E_LinU[0][0]) * E[0][1] - (E_eigenvalue_2 - E[0][0]) * E_LinU[0][1])/(E[0][1] * E[0][1]);
+
+        EV_2_part_2_comp_1 = normalization_2_LinU * 1.0;
+        EV_2_part_2_comp_2 = normalization_2_LinU * (E_eigenvalue_2 - E[0][0])/E[0][1];
+
+        // Build eigenvectors
+        E_eigenvector_1_LinU[0] = EV_1_part_1_comp_1 + EV_1_part_2_comp_1;
+        E_eigenvector_1_LinU[1] = EV_1_part_1_comp_2 + EV_1_part_2_comp_2;
+
+        E_eigenvector_2_LinU[0] = EV_2_part_1_comp_1 + EV_2_part_2_comp_1;
+        E_eigenvector_2_LinU[1] = EV_2_part_1_comp_2 + EV_2_part_2_comp_2;
+
+        // P-Matrix
+        P_matrix_LinU[0][0] = E_eigenvector_1_LinU[0];
+        P_matrix_LinU[0][1] = E_eigenvector_2_LinU[0];
+        P_matrix_LinU[1][0] = E_eigenvector_1_LinU[1];
+        P_matrix_LinU[1][1] = E_eigenvector_2_LinU[1];
+
+        double E_eigenvalue_1_plus_LinU = 0.0;
+        double E_eigenvalue_2_plus_LinU = 0.0;
+
+        // Very important: Set E_eigenvalue_1_plus_LinU to zero when
+        // the corresponding rhs-value is set to zero and NOT when
+        // the value itself is negative!!!
+        if (E_eigenvalue_1 < 0.0)
+        {
+            E_eigenvalue_1_plus_LinU = 0.0;
+        }
+        else
+            E_eigenvalue_1_plus_LinU = E_eigenvalue_1_LinU;
+
+        if (E_eigenvalue_2 < 0.0)
+        {
+            E_eigenvalue_2_plus_LinU = 0.0;
+        }
+        else
+            E_eigenvalue_2_plus_LinU = E_eigenvalue_2_LinU;
+
+
+        Tensor<2,dim> Lambda_plus_LinU;
+        Lambda_plus_LinU[0][0] = E_eigenvalue_1_plus_LinU;
+        Lambda_plus_LinU[0][1] = 0.0;
+        Lambda_plus_LinU[1][0] = 0.0;
+        Lambda_plus_LinU[1][1] = E_eigenvalue_2_plus_LinU;
+
+        Tensor<2,dim> E_plus_LinU = P_matrix_LinU * Lambda_plus * transpose(P_matrix) +  P_matrix * Lambda_plus_LinU * transpose(P_matrix) + P_matrix * Lambda_plus * transpose(P_matrix_LinU);
+
+
+        double tr_E_positive_LinU = 0.0;
+        if (tr_E < 0.0)
+        {
+            tr_E_positive_LinU = 0.0;
+        }
+        else
+            tr_E_positive_LinU = tr_E_LinU;
+
+        stress_term_plus = lame_coefficient_lambda * tr_E_positive_LinU * Identity
+            + 2 * lame_coefficient_mu * E_plus_LinU;
+
+        stress_term_minus = lame_coefficient_lambda * (tr_E_LinU - tr_E_positive_LinU) * Identity
+            + 2 * lame_coefficient_mu * (E_LinU - E_plus_LinU);
+
+
+        // Sanity check
+        //Tensor<2,dim> stress_term = lame_coefficient_lambda * tr_E_LinU * Identity
+        //  + 2 * lame_coefficient_mu * E_LinU;
+
+        //std::cout << stress_term.norm() << "   " << stress_term_plus.norm() << "   " << stress_term_minus.norm() << std::endl;
+    }
+}
+
+
+//-----------------------------------------------------------------------------
+// Class to perform local cell/face-level computations
+template <int dim>
+class DGElasticityPhaseFieldEquations
+{
+public:
+    DGElasticityPhaseFieldEquations(InputHandler &parser);
+
+    void set_min_cell_diameter(const double set_min_cell_diameter);
+
+    void get_solution_and_timestep_data(
+            BlockVector<double> gsolution,
+            BlockVector<double> gold_timestep_solution,
+            BlockVector<double> gold_old_timestep_solution,
+//            BlockVector<double> gsolution_lambda_penal_func,
+//            BlockVector<double> gold_timestep_solution_lambda_penal_func,
+            double gtime,
+            double gtimestep,
+            double gold_timestep,
+            double gold_old_timestep);
+
+    void assemble_cell_term_matrix(const FEValues<dim>& fe_v,
+            FullMatrix<double> &ui_phi_i_matrix) const;
+
+    void assemble_boundary_term_matrix(const FEFaceValues<dim>& fe_v,
+            const double face_measure,
+            FullMatrix<double> &ui_phi_i_matrix,
+            unsigned int boundary_color) const;
+
+    void assemble_face_term_matrix(const FEFaceValuesBase<dim>& fe_v,
+            const FEFaceValuesBase<dim>& fe_v_neighbor,
+            const double face_measure,
+            FullMatrix<double> &ui_phi_i_matrix,
+            FullMatrix<double> &ue_phi_i_matrix,
+            FullMatrix<double> &ui_phi_e_matrix,
+            FullMatrix<double> &ue_phi_e_matrix) const;
+
+    void assemble_cell_term_rhs(const FEValues<dim>& fe_v,
+            Vector<double> &cell_vector) const;
+
+    void assemble_boundary_term_rhs(const FEFaceValues<dim>& fe_v,
+            const double face_measure,
+            Vector<double> &cell_vector,
+            unsigned int boundary_color) const;
+
+    void assemble_face_term_rhs(const FEFaceValuesBase<dim>& fe_v,
+            const FEFaceValuesBase<dim>& fe_v_neighbor,
+            const double face_measure,
+            Vector<double> &ui_phi_i_rhs,
+            Vector<double> &ue_phi_i_rhs,
+            Vector<double> &ui_phi_e_rhs,
+            Vector<double> &ue_phi_e_rhs) const;
+
+    double lame_coefficient_mu_global();
+    double lame_coefficient_lambda_global();
+
+private:
+    InputHandler &parser;
+    TestCase testcase;
+    LinearizationScheme lintype;
+    OptimizationType opttype;
+    BlockVector<double> solution, old_timestep_solution, old_old_timestep_solution;
+//    BlockVector<double> solution_lambda_penal_func, old_timestep_solution_lambda_penal_func;
+    double theta_DG;
+    double time, timestep, old_timestep, old_old_timestep;
+    double lame_coefficient_mu, lame_coefficient_lambda;
+    // Solid
+    double constant_k, alpha_eps, G_c, gamma_penal, penalty_u_bc, penalty_u_face;
+    double min_cell_diameter;
+    bool decompose_stress_matrix, decompose_stress_rhs;
+};
+
+// Constructor: populate parameters from InputHandler class object reference
+template <int dim>
+DGElasticityPhaseFieldEquations<dim>::
+DGElasticityPhaseFieldEquations (InputHandler &parser) :
+    parser(parser)
+{
+    // Determine test case
+    if (parser.get_testcase() == "miehe tension")
+        testcase = TestCase::miehe_tension;
+    else if (parser.get_testcase() == "miehe shear")
+        testcase = TestCase::miehe_shear;
+    else if (parser.get_testcase() == "symmetric bending")
+        testcase = TestCase::symmetric_bending;
+    else
+        testcase = TestCase::none;
+
+    // Set linearization type
+    if (parser.get_lintype() == "simple")
+        lintype = LinearizationScheme::simple;
+    else if (parser.get_lintype() == "interpolation")
+        lintype = LinearizationScheme::interpolation;
+    else
+        lintype = LinearizationScheme::none;
+
+    // Set optimization type
+    if (parser.get_opttype() == "simple penalization")
+        opttype = OptimizationType::simple;
+    else if (parser.get_opttype() == "augmented lagrange")
+        opttype = OptimizationType::auglag;
+    else
+        opttype = OptimizationType::none;
+
+    // Populate parameters
+    penalty_u_bc = parser.get_penaltyBC();      // Penalty for Dirichlet BC
+    penalty_u_face  = parser.get_penaltyDG();   // Penalty for internal faces
+    gamma_penal = parser.get_penaltyAL();       // Aug-Lagrangian penalization
+    theta_DG = parser.get_sform();              // DG method parameter
+
+    // Phase-field regularization parameters
+    // alpha_eps could be formulated in terms
+    // of the minimal `h' (see min_cell_diameter)
+    // alpha_eps gives the width of the transition zone
+    constant_k = parser.get_pfkappa();
+    alpha_eps = parser.get_pfepsilon();  // 4.4e-2 // alpha_eps = 2h
+
+    // Critical energy release rate
+    G_c = parser.get_criticalGc();
+
+    // Solid parameters
+    lame_coefficient_mu = parser.get_lamemu();
+    lame_coefficient_lambda =  parser.get_lamelambda();
+
+    decompose_stress_matrix = parser.get_decomposestressmatrix();
+    decompose_stress_rhs = parser.get_decomposestressrhs ();
+}
+
+// Inject data from class DGMethod<dim> back into cell-level routines
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::get_solution_and_timestep_data (
+        BlockVector<double> gsolution,
+        BlockVector<double> gold_timestep_solution,
+        BlockVector<double> gold_old_timestep_solution,
+//        BlockVector<double> gsolution_lambda_penal_func,
+//        BlockVector<double> gold_timestep_solution_lambda_penal_func,
+        double gtime,
+        double gtimestep,
+        double gold_timestep,
+        double gold_old_timestep)
+{
+    solution = gsolution;
+    old_timestep_solution = gold_timestep_solution;
+    old_old_timestep_solution = gold_old_timestep_solution;
+//    solution_lambda_penal_func = gsolution_lambda_penal_func;
+//    old_timestep_solution_lambda_penal_func = gold_timestep_solution_lambda_penal_func;
+    time = gtime;
+    timestep = gtimestep;
+    old_timestep = gold_timestep;
+    old_old_timestep = gold_old_timestep;
+}
+
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::set_min_cell_diameter(const double set_min_cell_diameter)
+{
+    // The min_cell_diameter is important for alpha_eps
+    // and the penalization parameter
+    min_cell_diameter = set_min_cell_diameter;
+}
+
+template <int dim>
+double DGElasticityPhaseFieldEquations<dim>::lame_coefficient_mu_global ()
+{
+    return lame_coefficient_mu;
+}
+
+template <int dim>
+double DGElasticityPhaseFieldEquations<dim>::lame_coefficient_lambda_global ()
+{
+    return lame_coefficient_lambda;
+}
+
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::assemble_cell_term_matrix(const FEValues<dim> &fe_values,
+        FullMatrix<double> &ui_phi_i_matrix) const
+{
+    const unsigned int   dofs_per_cell   = fe_values.dofs_per_cell;
+    const unsigned int   n_q_points = fe_values.n_quadrature_points;
+
+    const std::vector<double> &JxW = fe_values.get_JxW_values ();
+
+    const FEValuesExtractors::Vector displacements (0);
+    const FEValuesExtractors::Scalar phase_field (2);
+
+    std::vector<Vector<double> > old_solution_values (n_q_points,
+        Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads (n_q_points,
+        std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_timestep_solution_values (n_q_points,
+        Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_timestep_solution_grads (n_q_points,
+        std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_old_timestep_solution_values (n_q_points,
+        Vector<double>(dim+1));
+
+    std::vector<Tensor<1,dim> > phi_i_u (dofs_per_cell);
+    std::vector<Tensor<2,dim> > phi_i_grads_u(dofs_per_cell);
+    std::vector<double>         phi_i_pf(dofs_per_cell);
+    std::vector<Tensor<1,dim> > phi_i_grads_pf (dofs_per_cell);
+
+    // Old Newton iteration values
+    fe_values.get_function_values (solution, old_solution_values);
+    fe_values.get_function_grads (solution, old_solution_grads);
+
+    fe_values.get_function_values (old_timestep_solution, old_timestep_solution_values);
+    fe_values.get_function_grads (old_timestep_solution, old_timestep_solution_grads);
+
+    fe_values.get_function_values (old_old_timestep_solution, old_old_timestep_solution_values);
+
+    Tensor<2,dim> identity;
+    identity[0][0] = 1.0;
+    identity[0][1] = 0.0;
+    identity[1][0] = 0.0;
+    identity[1][1] = 1.0;
+
+    for (unsigned int q=0; q<n_q_points; ++q)
+    {
+        for (unsigned int k=0; k<dofs_per_cell; ++k)
+        {
+            phi_i_u[k]       = fe_values[displacements].value (k, q);
+            phi_i_grads_u[k] = fe_values[displacements].gradient (k, q);
+            phi_i_pf[k]      = fe_values[phase_field].value (k, q);
+            phi_i_grads_pf[k]= fe_values[phase_field].gradient (k, q);
+        }
+
+        double pf_extra = 0.0;
+        const double pf = old_solution_values[q](dim);
+        const double old_timestep_pf = old_timestep_solution_values[q](dim);
+        const double old_old_timestep_pf = old_old_timestep_solution_values[q](dim);
+
+        if (lintype == LinearizationScheme::simple)
+            pf_extra = old_timestep_pf;
+        else if (lintype == LinearizationScheme::interpolation)
+            pf_extra = old_old_timestep_pf + (time - (time-old_timestep-old_old_timestep))/
+                (time-old_timestep - (time-old_timestep-old_old_timestep)) * (old_timestep_pf - old_old_timestep_pf);
+        else
+            abort();
+
+        if (pf_extra <= 0.0)
+            pf_extra = 0.0;
+        if (pf_extra >= 1.0)
+            pf_extra = 1.0;
+
+        Tensor<2,dim> grad_u;
+        grad_u[0][0] =  old_solution_grads[q][0][0];
+        grad_u[0][1] =  old_solution_grads[q][0][1];
+        grad_u[1][0] =  old_solution_grads[q][1][0];
+        grad_u[1][1] =  old_solution_grads[q][1][1];
+
+        const Tensor<2,dim> E = 0.5 * (grad_u + transpose(grad_u));
+        const double tr_E = grad_u[0][0] + grad_u[1][1];
+
+        // Stress terms at previous newton step
+        Tensor<2,dim> stress_term_plus, stress_term_minus;
+        if (decompose_stress_matrix)
+        {
+            Tensor<2,dim> zero_matrix;
+            zero_matrix = 0;
+            std::cout << "DEBUG: Decomposing!" << std::endl;
+            decompose_stress(stress_term_plus, stress_term_minus,
+                    E, tr_E, zero_matrix, 0.0,
+                    lame_coefficient_mu,
+                    lame_coefficient_lambda, false);
+        } else
+        {
+            stress_term_plus = 2.0 * lame_coefficient_mu * E +
+                lame_coefficient_lambda * tr_E * identity;
+            stress_term_minus = 0;
+        }
+
+        for (unsigned int i=0; i<dofs_per_cell; ++i)
+        {
+            const Tensor<2,dim> E_LinU = 0.5 * (phi_i_grads_u[i] + transpose(phi_i_grads_u[i]));
+            const double tr_E_LinU = trace(E_LinU);
+
+            // Stress terms linearized in 'U'
+            Tensor<2, dim> stress_term_LinU_plus, stress_term_LinU_minus;
+
+            if (decompose_stress_matrix)
+            {
+            std::cout << "DEBUG: Decomposing!" << std::endl;
+                decompose_stress(stress_term_LinU_plus, stress_term_LinU_minus,
+                        E, tr_E, E_LinU, tr_E_LinU,
+                        lame_coefficient_mu,
+                        lame_coefficient_lambda, true);
+            } else
+            {
+                stress_term_LinU_plus = 2 * lame_coefficient_mu * E_LinU +
+                    lame_coefficient_lambda * tr_E_LinU * identity;
+                stress_term_LinU_minus = 0;
+            }
+
+            for (unsigned int j=0; j<dofs_per_cell; ++j)
+            {
+                // Displacement
+                ui_phi_i_matrix(j,i) += timestep * JxW[q] *
+                    (scalar_product(((1 - constant_k) * pf_extra * pf_extra + constant_k) *
+                        stress_term_LinU_plus + stress_term_LinU_minus, phi_i_grads_u[j]));
+
+                // Phase-field
+                ui_phi_i_matrix(j,i) += JxW[q] * gamma_penal * phi_i_pf[i] * phi_i_pf[j];
+
+                // Cross Terms
+                ui_phi_i_matrix(j,i) += timestep * JxW[q] *
+                    (((1-constant_k) * (pf * scalar_product(stress_term_LinU_plus, E) +
+                            pf * scalar_product(stress_term_plus, E_LinU) +
+                        scalar_product(stress_term_plus, E) * phi_i_pf[i]) * phi_i_pf[j]) +
+                     (G_c/alpha_eps * phi_i_pf[i] * phi_i_pf[j]  +
+                     G_c * alpha_eps * phi_i_grads_pf[i] * phi_i_grads_pf[j]));
+            } // end j
+        } // end i
+    } // end q_point
+}
+
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::assemble_cell_term_rhs(const FEValues<dim> &fe_values,
+        Vector<double> &local_rhs) const
+{
+    const unsigned int   dofs_per_cell   = fe_values.dofs_per_cell;
+    const unsigned int   n_q_points = fe_values.n_quadrature_points;
+
+    const std::vector<double> &JxW = fe_values.get_JxW_values ();
+
+    const FEValuesExtractors::Vector displacements (0);
+    const FEValuesExtractors::Scalar phase_field (2);
+
+    std::vector<Vector<double> > old_solution_values (n_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads (n_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_timestep_solution_values (n_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_timestep_solution_grads (n_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_old_timestep_solution_values (n_q_points,
+            Vector<double>(dim+1));
+
+    //std::vector<Vector<double> > old_solution_values_lambda_penal_func (n_q_points,
+    //        Vector<double>(dim+1));
+
+    // Old Newton iteration values
+    fe_values.get_function_values (solution, old_solution_values);
+    fe_values.get_function_grads (solution, old_solution_grads);
+
+    fe_values.get_function_values (old_timestep_solution, old_timestep_solution_values);
+    fe_values.get_function_grads (old_timestep_solution, old_timestep_solution_grads);
+
+    fe_values.get_function_values (old_old_timestep_solution, old_old_timestep_solution_values);
+    //fe_values.get_function_values (solution_lambda_penal_func, old_solution_values_lambda_penal_func);
+
+    Tensor<2,dim> identity;
+    identity[0][0] = 1.0;
+    identity[0][1] = 0.0;
+    identity[1][0] = 0.0;
+    identity[1][1] = 1.0;
+
+    for (unsigned int q=0; q<n_q_points; ++q)
+    {
+        double pf_extra = 0.0;
+        const double pf = old_solution_values[q](dim);
+        const double old_timestep_pf = old_timestep_solution_values[q](dim);
+        const double old_old_timestep_pf = old_old_timestep_solution_values[q](dim);
+        //const double lambda_penal_func = old_solution_values_lambda_penal_func[q](dim);
+
+        if (lintype == LinearizationScheme::simple)
+            pf_extra = old_timestep_pf;
+        else if (lintype == LinearizationScheme::interpolation)
+            pf_extra = old_old_timestep_pf + (time - (time-old_timestep-old_old_timestep))/
+                (time-old_timestep - (time-old_timestep-old_old_timestep)) * (old_timestep_pf - old_old_timestep_pf);
+
+        if (pf_extra <= 0.0)
+            pf_extra = 0.0;
+        if (pf_extra >= 1.0)
+            pf_extra = 1.0;
+
+        double pf_minus_old_timestep_pf_plus = 0.0;
+        if (opttype == OptimizationType::simple)
+            pf_minus_old_timestep_pf_plus = gamma_penal * (pf - old_timestep_pf);
+        else
+            abort();
+
+        if (pf_minus_old_timestep_pf_plus < 0)
+            pf_minus_old_timestep_pf_plus = 0.0;
+
+
+        Tensor<1,dim> grad_pf;
+        grad_pf[0] =  old_solution_grads[q][dim][0];
+        grad_pf[1] =  old_solution_grads[q][dim][1];
+
+        Tensor<1,dim> u;
+        u[0] = old_solution_values[q](0);
+        u[1] = old_solution_values[q](1);
+
+        Tensor<1,dim> old_timestep_u;
+        old_timestep_u[0] = old_timestep_solution_values[q](0);
+        old_timestep_u[1] = old_timestep_solution_values[q](1);
+
+        Tensor<2,dim> grad_u;
+        grad_u[0][0] =  old_solution_grads[q][0][0];
+        grad_u[0][1] =  old_solution_grads[q][0][1];
+        grad_u[1][0] =  old_solution_grads[q][1][0];
+        grad_u[1][1] =  old_solution_grads[q][1][1];
+
+        Tensor<2,dim> E = 0.5 * (grad_u + transpose(grad_u));
+        double tr_E = trace(E);
+
+        Tensor<2,dim> stress_term_plus, stress_term_minus, zero_matrix;
+        zero_matrix = 0;
+
+        if (decompose_stress_rhs)
+        {
+
+            std::cout << "DEBUG: Decomposing!" << std::endl;
+            decompose_stress(stress_term_plus, stress_term_minus,
+                    E, tr_E, zero_matrix, 0.0,
+                    lame_coefficient_mu,
+                    lame_coefficient_lambda, false);
+        } else
+        {
+            stress_term_plus = 2.0 * lame_coefficient_mu * E +
+                lame_coefficient_lambda * tr_E * identity;
+            stress_term_minus = 0;
+        }
+        for (unsigned int i=0; i<dofs_per_cell; ++i)
+        {
+            const Tensor<2,dim> phi_i_grads_u  = fe_values[displacements].gradient (i, q);
+            const double phi_i_pf              = fe_values[phase_field].value (i, q);
+            const Tensor<1,dim> phi_i_grads_pf = fe_values[phase_field].gradient (i, q);
+
+            // Displacement
+            local_rhs(i) -= timestep * JxW[q] *
+                (scalar_product(((1 - constant_k) * pf_extra * pf_extra + constant_k) * stress_term_plus +
+                    stress_term_minus, phi_i_grads_u));
+
+            // Augmented Lagrangian OR Simple Penalization
+            local_rhs(i) -= JxW[q] * pf_minus_old_timestep_pf_plus * phi_i_pf;
+
+            // Phase-field and cross terms
+            local_rhs(i) -= timestep * JxW[q] *
+                ((1.0 - constant_k) * pf * scalar_product(stress_term_plus, E) * phi_i_pf
+                 - G_c/alpha_eps * (1.0 - pf) * phi_i_pf
+                 + G_c * alpha_eps * grad_pf * phi_i_grads_pf);
+        } // end i
+    } // end q_point
+}
+
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::assemble_boundary_term_matrix(const FEFaceValues<dim>& fe_values,
+        const double face_measure,
+        FullMatrix<double> &ui_phi_i_matrix,
+        unsigned int boundary_color) const
+{
+    // TODO: Implement stress decomposition
+    // TODO: Add 1-constant_k factor to sigma_s terms commented out
+    // TODO: Add conditional block that checks value of 'testcase'
+    // DONE: Modify penalty term to include |e|^\beta factor (accept |e| as argument)
+    double neumann_right = 1.0;
+    double neumann_left = 1.0;
+    double neumann_bottom = 1.0;
+    double neumann_top = 1.0;
+
+    if (boundary_color == 1)
+        neumann_right = 1.0;
+    else
+        neumann_right = 0.0;
+
+    if (boundary_color == 0)
+        neumann_left = 1.0;
+    else
+        neumann_left = 0.0;
+
+    if (boundary_color == 2)
+        neumann_bottom = 1.0;
+    else
+        neumann_bottom = 0.0;
+
+    if (boundary_color == 3)
+        neumann_top = 1.0;
+    else
+        neumann_top = 0.0;
+
+    const FEValuesExtractors::Vector displacements (0);
+    const unsigned int   dofs_per_cell   = fe_values.dofs_per_cell;
+    const unsigned int n_face_q_points   = fe_values.n_quadrature_points;
+
+    std::vector<Tensor<1,dim> > phi_i_u (dofs_per_cell);
+    std::vector<Tensor<2,dim> > phi_i_grads_u(dofs_per_cell);
+    std::vector<Tensor<2,dim> > sigma_phi (dofs_per_cell);
+
+    std::vector<Vector<double> > old_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<Vector<double>> old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<Vector<double>> old_old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads (n_face_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    fe_values.get_function_values (solution, old_solution_values);
+    fe_values.get_function_grads (solution, old_solution_grads);
+
+    fe_values.get_function_values (old_timestep_solution, old_timestep_solution_values);
+    fe_values.get_function_values (old_old_timestep_solution, old_old_timestep_solution_values);
+
+    Tensor<2,dim> identity;
+    identity[0][0] = 1.0;
+    identity[0][1] = 0.0;
+    identity[1][0] = 0.0;
+    identity[1][1] = 1.0;
+
+    //!mital
+    const double penalty = penalty_u_bc;// / face_measure;
+
+    for (unsigned int q=0; q<n_face_q_points; ++q)
+    {
+        for (unsigned int k=0; k<dofs_per_cell; ++k)
+        {
+            phi_i_u[k]       = fe_values[displacements].value (k, q);
+            phi_i_grads_u[k] = fe_values[displacements].gradient (k, q);
+            Tensor<2,dim> E = 0.5 * (phi_i_grads_u[k] + transpose(phi_i_grads_u[k]));
+            sigma_phi[k] = 2.0 * lame_coefficient_mu * E +
+                lame_coefficient_lambda * trace(E) * identity;
+        }
+
+        const double dx = fe_values.JxW(q);
+        //const Point<dim>& n = fe_values.normal_vector(q);
+        //const double factor = (1 - constant_k) * pf_extra * pf_extra + constant_k;
+
+        Tensor<2,dim> grad_u;
+        grad_u[0][0] =  old_solution_grads[q][0][0];
+        grad_u[0][1] =  old_solution_grads[q][0][1];
+        grad_u[1][0] =  old_solution_grads[q][1][0];
+        grad_u[1][1] =  old_solution_grads[q][1][1];
+
+
+        for (unsigned i=0;i<dofs_per_cell;++i)
+        {
+            // Here are some terms commented because
+            // I choose the penalization parameter very high
+            // such that the other terms are negligable
+            //Tensor<2,dim> E = 0.5 * (phi_i_grads_u[i] + transpose(phi_i_grads_u[i]));
+            //Tensor<2,dim> sigma_s = 2.0 * lame_coefficient_mu * E +
+            //    lame_coefficient_lambda * trace(E) * identity;
+
+            for (unsigned j=0;j<dofs_per_cell;++j)
+            {
+                //Tensor<1,dim> tmp_s, tmp_phi;
+                //tmp_s = sigma_s * n;
+                //tmp_phi = sigma_phi[j] * n;
+
+                //!mital: Thomas multiplies all terms by
+                //!mital: Maybe I need to enforce the traction and displacement both e.g.
+                //ui_phi_i_matrix(j,i) += neumann_left * dx * timestep *
+                //(phi_i_u[i][0] * penalty * phi_i_u[j][0]
+                ////- factor * tmp_s[0] * phi_i_u[j][0]
+                ////+ theta_DG * factor * tmp_phi[1] * phi_i_u[i][1]); --> so that we can set y-comp of traction to zero
+
+                // Displacements (structure domain): left (0): u_x = 0
+                ui_phi_i_matrix(j,i) += neumann_left * dx * timestep *
+                    (phi_i_u[i][0] * penalty * phi_i_u[j][0]
+                     //- factor * tmp_s[0] * phi_i_u[j][0]
+                     //+ theta_DG * factor * tmp_phi[0] * phi_i_u[i][0]
+                     );
+
+                // Displacements (structure domain): right(0): u_x = 0
+                ui_phi_i_matrix(j,i) += neumann_right * dx * timestep *
+                    (phi_i_u[i][0] * penalty * phi_i_u[j][0]
+                     //- factor * tmp_s[0] * phi_i_u[j][0]
+                     //+ theta_DG * factor * tmp_phi[0] * phi_i_u[i][0]
+                     );
+
+                // Displacements (structure domain): bottom (1): u_y = 0
+                ui_phi_i_matrix(j,i) += neumann_bottom * dx * timestep *
+                    (phi_i_u[i][1] * penalty * phi_i_u[j][1]
+                     //- factor * tmp_s[1] * phi_i_u[j][1]
+                     //+ theta_DG * factor * tmp_phi[1] * phi_i_u[i][1]
+                     );
+
+                // Displacements (structure domain): top (1): u_y = 0
+                ui_phi_i_matrix(j,i) += neumann_top * dx * timestep *
+                    (phi_i_u[i][1] * penalty * phi_i_u[j][1]
+                     //- factor * tmp_s[1] * phi_i_u[j][1]
+                     //+ theta_DG * factor * tmp_phi[1] * phi_i_u[i][1]
+                     );
+            } // end j
+        } // end i
+    } // end q_point
+}
+
+
+///////////////////////////////////////////////////////////////
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::assemble_boundary_term_rhs(const FEFaceValues<dim>& fe_values,
+        const double face_measure,
+        Vector<double> &local_rhs,
+        unsigned int boundary_color) const
+{
+    // TODO: See TODO from assemble_boundary_term_matrix
+    // This function should mirror the above function
+    // Q: how to implement mixed BCs with the current scheme?
+    double neumann_right = 1.0;
+    double neumann_top = 0.0;
+    double neumann_left = 0.0;
+    double neumann_bottom = 0.0;
+
+    if (boundary_color == 1)
+        neumann_right = 1.0; // 0.0
+    else
+        neumann_right = 0.0;
+
+    if (boundary_color == 3)
+        neumann_top = 1.0;
+    else
+        neumann_top = 0.0;
+
+    if (boundary_color == 0)
+        neumann_left = 1.0;
+    else
+        neumann_left = 0.0;
+
+    if (boundary_color == 2)
+        neumann_bottom = 1.0;
+    else
+        neumann_bottom = 0.0;
+
+    const FEValuesExtractors::Vector displacements (0);
+    const unsigned int   dofs_per_cell   = fe_values.dofs_per_cell;
+    const unsigned int n_face_q_points   = fe_values.n_quadrature_points;
+
+    // We declare Vectors and Tensors for
+    // the solutions at the previous Newton iteration:
+    std::vector<Vector<double> > old_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads (n_face_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_timestep_solution_grads (n_face_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    fe_values.get_function_values (solution, old_solution_values);
+    fe_values.get_function_grads (solution, old_solution_grads);
+    fe_values.get_function_values (old_timestep_solution, old_timestep_solution_values);
+    fe_values.get_function_values (old_old_timestep_solution, old_old_timestep_solution_values);
+
+    Tensor<2,dim> identity;
+    identity[0][0] = 1.0;
+    identity[0][1] = 0.0;
+    identity[1][0] = 0.0;
+    identity[1][1] = 1.0;
+
+    //!mital
+    const double penalty = penalty_u_bc; /// face_measure;
+
+    for (unsigned int q=0; q<n_face_q_points; ++q)
+    {
+        Tensor<1,dim> u;
+        u[0] = old_solution_values[q](0);
+        u[1] = old_solution_values[q](1);
+
+        Tensor<2,dim> grad_u;
+        grad_u[0][0] =  old_solution_grads[q][0][0];
+        grad_u[0][1] =  old_solution_grads[q][0][1];
+        grad_u[1][0] =  old_solution_grads[q][1][0];
+        grad_u[1][1] =  old_solution_grads[q][1][1];
+
+        const double dx = fe_values.JxW(q);
+        //const Point<dim>& n = fe_values.normal_vector(q);
+        //const double factor = (1 - constant_k) * pf_extra * pf_extra + constant_k;
+        // Some terms are commented because
+        // the penalization parameter is very high
+        // such that their influence is negligable
+        //Tensor<2,dim> E = 0.5 * (grad_u + transpose(grad_u));
+        //Tensor<2,dim> sigma_s = 2.0 * lame_coefficient_mu * E +
+        //    lame_coefficient_lambda * trace(E) * identity;
+
+
+        for (unsigned i=0;i<dofs_per_cell;++i)
+        {
+            const Tensor<1,dim> phi_i_u       = fe_values[displacements].value (i, q);
+            //const Tensor<2,dim> phi_i_grads_u = fe_values[displacements].gradient (i, q);
+            //Tensor<2,dim> E = 0.5 * (phi_i_grads_u + transpose(phi_i_grads_u));
+            //Tensor<2,dim> sigma_phi = 2.0 * lame_coefficient_mu * E +
+            //    lame_coefficient_lambda * trace(E) * identity;
+
+            //Tensor<1,dim> tmp_s, tmp_phi;
+            //tmp_s = sigma_s * n;
+            //tmp_phi = sigma_phi * n;
+
+            //!mital: Thomas adds 2 to each term
+            //!mital: See function above for possible alternative mixed-BC implementation
+
+            // Displacements (structure domain): left: u_x = 0
+            local_rhs(i) -= neumann_left * dx * timestep *
+                ((u[0] - 0.0) * penalty * phi_i_u[0]
+                 //- factor * tmp_s[0] * phi_i_u[0]
+                 //+ theta_DG * factor * tmp_phi[0] * (u[0] /*- g_d*/)
+                 );
+
+            // Displacements (structure domain): right: u_x = 0
+            local_rhs(i) -= neumann_right * dx * timestep *
+                ((u[0] - 0.0) * penalty * phi_i_u[0]
+                 //- factor * tmp_s[0] * phi_i_u[0]
+                 //+ theta_DG * factor * tmp_phi[0] * u[0]
+                 );
+
+            // bottom: u_y = 0
+            local_rhs(i) -= neumann_bottom * dx * timestep *
+                ((u[1] - 0.0) * penalty * phi_i_u[1]
+                 //- factor * tmp_s[1] * phi_i_u[1]
+                 //+ theta_DG * factor * tmp_phi[1] * u[1]
+                 );
+
+            // top: u_y = 0
+            local_rhs(i) -= neumann_top * dx * timestep *
+                ((u[1] - time * 1.0) * penalty * phi_i_u[1]
+                 //- factor * tmp_s[1] *  phi_i_u[1]
+                 //+ theta_DG * factor * tmp_phi[1] * (u[1] - time * 1.0)
+                 );
+        } // end i
+    } // end q_point
+}
+
+
+///////////////////////////////////////////////////////////////
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::assemble_face_term_matrix(const FEFaceValuesBase<dim>& fe_values,
+        const FEFaceValuesBase<dim>& fe_values_neighbor,
+        const double face_measure,
+        FullMatrix<double> &ui_phi_i_matrix,
+        FullMatrix<double> &ue_phi_i_matrix,
+        FullMatrix<double> &ui_phi_e_matrix,
+        FullMatrix<double> &ue_phi_e_matrix) const
+{
+    // DONE: scale penalty_u with |e|
+
+    const FEValuesExtractors::Vector displacements (0);
+    const FEValuesExtractors::Scalar phase_field (dim);
+
+    const unsigned int   dofs_per_cell   = fe_values.dofs_per_cell;
+    const unsigned int n_face_q_points   = fe_values.n_quadrature_points;
+
+    // We declare Vectors and Tensors for
+    // the solutions at the previous Newton iteration:
+    std::vector<Vector<double> > old_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads (n_face_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_solution_values_neighbor (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads_neighbor (n_face_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<Vector<double> > old_old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    // Old Newton iteration values
+    fe_values.get_function_values (solution, old_solution_values);
+    fe_values.get_function_grads (solution, old_solution_grads);
+
+    fe_values_neighbor.get_function_values (solution, old_solution_values_neighbor);
+    fe_values_neighbor.get_function_grads (solution, old_solution_grads_neighbor);
+
+    fe_values.get_function_values (old_timestep_solution, old_timestep_solution_values);
+    fe_values.get_function_values (old_old_timestep_solution, old_old_timestep_solution_values);
+
+    Tensor<2,dim> identity;
+    identity[0][0] = 1.0;
+    identity[0][1] = 0.0;
+    identity[1][0] = 0.0;
+    identity[1][1] = 1.0;
+
+    //!mital
+    const double penalty = penalty_u_face; /// face_measure;
+
+    for (unsigned int q=0; q<n_face_q_points; ++q)
+    {
+        const double dx =  fe_values.JxW(q);
+        const Point<dim>& n = fe_values.normal_vector(q);
+
+        double pf_extra = 0.0;
+        const double old_timestep_pf = old_timestep_solution_values[q](dim);
+        const double old_old_timestep_pf = old_old_timestep_solution_values[q](dim);
+
+        if (lintype == LinearizationScheme::simple)
+            pf_extra = old_timestep_pf;
+        else if (lintype == LinearizationScheme::interpolation)
+            pf_extra = old_old_timestep_pf + (time - (time-old_timestep-old_old_timestep))/
+                (time-old_timestep - (time-old_timestep-old_old_timestep)) * (old_timestep_pf - old_old_timestep_pf);
+
+        if (pf_extra <= 0.0)
+            pf_extra = 0.0;
+        if (pf_extra >= 1.0)
+            pf_extra = 1.0;
+
+        //!mital: setting factor as per original code from thomas
+        //const double factor = ((1-constant_k) * pf_extra * pf_extra + constant_k);
+        //const double factor = pf_extra;
+
+        Tensor<2,dim> E_i, E_e;
+        if (decompose_stress_matrix)
+        {
+            // Compute to later use for computing sigma_LinU_plus_i/e
+            std::cout << "DEBUG: Decomposing!" << std::endl;
+            Tensor<2,dim> grad_u_i, grad_u_e;
+            grad_u_i[0][0] = old_solution_grads[q][0][0];
+            grad_u_i[0][1] = old_solution_grads[q][0][1];
+            grad_u_i[1][0] = old_solution_grads[q][1][0];
+            grad_u_i[1][1] = old_solution_grads[q][1][1];
+            grad_u_e[0][0] = old_solution_grads_neighbor[q][0][0];
+            grad_u_e[0][1] = old_solution_grads_neighbor[q][0][1];
+            grad_u_e[1][0] = old_solution_grads_neighbor[q][1][0];
+            grad_u_e[1][1] = old_solution_grads_neighbor[q][1][1];
+
+            E_i = 0.5 * (grad_u_i + transpose(grad_u_i));
+            E_e = 0.5 * (grad_u_e + transpose(grad_u_e));
+        } else
+        {
+            E_i = 0;
+            E_e = 0;
+        }
+
+        for (unsigned i=0;i<dofs_per_cell;++i)
+        {
+            // Displacements (test functions)
+            // i=+ , e=-
+            const Tensor<1,dim> phi_i_u      = fe_values[displacements].value(i,q);
+            const Tensor<2,dim> phi_i_grad_u = fe_values[displacements].gradient(i,q);
+            const Tensor<1,dim> phi_e_u      = fe_values_neighbor[displacements].value(i,q);
+            const Tensor<2,dim> phi_e_grad_u = fe_values_neighbor[displacements].gradient(i,q);
+
+            const Tensor<2,dim> E_pi = 0.5 * (phi_i_grad_u + transpose(phi_i_grad_u));
+            const Tensor<2,dim> E_pe = 0.5 * (phi_e_grad_u + transpose(phi_e_grad_u));
+
+            Tensor<2,dim> sigma_pi_plus, sigma_pi_minus, sigma_pe_plus, sigma_pe_minus;
+            if (decompose_stress_matrix)
+            {
+            std::cout << "DEBUG: Decomposing!" << std::endl;
+                Tensor<2,dim> zero_matrix;
+                zero_matrix = 0;
+                decompose_stress(sigma_pi_plus, sigma_pi_minus,
+                        E_pi, trace(E_pi), zero_matrix, 0.0,
+                        lame_coefficient_mu,
+                        lame_coefficient_lambda, false);
+                decompose_stress(sigma_pe_plus, sigma_pe_minus,
+                        E_pe, trace(E_pe), zero_matrix, 0.0,
+                        lame_coefficient_mu,
+                        lame_coefficient_lambda, false);
+            } else
+            {
+                sigma_pi_plus = 2.0 * lame_coefficient_mu * E_pi + lame_coefficient_lambda * trace(E_pi) * identity;
+                sigma_pi_minus = 0;
+
+                sigma_pe_plus = 2.0 * lame_coefficient_mu * E_pe + lame_coefficient_lambda * trace(E_pe) * identity;
+                sigma_pe_minus = 0;
+            }
+
+            for (unsigned j=0;j<dofs_per_cell;++j)
+            {
+
+                // Displacements (trial functions)
+                // i=+ , e=-
+                const Tensor<1,dim> ui_u         = fe_values[displacements].value(j,q);
+                const Tensor<2,dim> ui_grad_u    = fe_values[displacements].gradient(j,q);
+                const Tensor<1,dim> ue_u         = fe_values_neighbor[displacements].value(j,q);
+                const Tensor<2,dim> ue_grad_u    = fe_values_neighbor[displacements].gradient(j,q);
+
+                // Displacements strain and stress tensors
+                const Tensor<2,dim> E_ui = 0.5 * (ui_grad_u + transpose(ui_grad_u));
+                const Tensor<2,dim> E_ue = 0.5 * (ue_grad_u + transpose(ue_grad_u));
+
+                Tensor<2,dim> sigma_ui_plus, sigma_ui_minus, sigma_ue_plus, sigma_ue_minus;
+                if (decompose_stress_matrix)
+                {
+                    std::cout << "DEBUG: Decomposing!" << std::endl;
+                    // sigma_u(i/e)_(plus/minus) is sigma_s_LinU_(i/e)_(plus/minus) and uses the
+                    // solution at the previous newton iteration
+                    decompose_stress(sigma_ui_plus, sigma_ui_minus,
+                            E_i, trace(E_i), E_ui, trace(E_ui),
+                            lame_coefficient_mu,
+                            lame_coefficient_lambda, true);
+                    decompose_stress(sigma_ue_plus, sigma_ue_minus,
+                            E_e, trace(E_e), E_ue, trace(E_ue),
+                            lame_coefficient_mu,
+                            lame_coefficient_lambda, true);
+                } else
+                {
+                    sigma_ui_plus = 2.0 * lame_coefficient_mu * E_ui + lame_coefficient_lambda * trace(E_ui) * identity;
+                    sigma_ui_minus = 0;
+
+                    sigma_ue_plus = 2.0 * lame_coefficient_mu * E_ue + lame_coefficient_lambda * trace(E_ue) * identity;
+                    sigma_ue_minus = 0;
+                }
+
+                // Displacements structure domain
+                //!mital: making factor = pf_extra in accordance with original code from Thomas
+                //also adding a pf_extra term to the jump term
+                double factor = pf_extra;
+
+                ui_phi_i_matrix(i,j) += dx * timestep * (
+                        -0.5 * (/* factor * */ sigma_ui_plus /* + sigma_ui_minus */) * n * phi_i_u
+                        +0.5 * theta_DG * (/* factor * */ sigma_pi_plus /* + sigma_pi_minus */) * n * ui_u
+                        +factor * penalty * ui_u * phi_i_u );
+
+                ue_phi_i_matrix(i,j) += dx * timestep * (
+                        -0.5 * (/* factor * */ sigma_ue_plus /* + sigma_ue_minus */) * n * phi_i_u
+                        -0.5 * theta_DG * (/* factor * */ sigma_pi_plus /* + sigma_pi_minus */) * n * ue_u
+                        -factor * penalty * ue_u * phi_i_u );
+
+                ui_phi_e_matrix(i,j) += dx * timestep * (
+                        +0.5 * (/* factor * */ sigma_ui_plus /* + sigma_ui_minus */) * n * phi_e_u
+                        +0.5 * theta_DG * (/* factor * */ sigma_pe_plus /* + sigma_pe_minus */) * n * ui_u
+                        -factor * penalty * ui_u * phi_e_u );
+
+                ue_phi_e_matrix(i,j) += dx * timestep * (
+                        +0.5 * (/* factor * */ sigma_ue_plus /* + sigma_ue_minus */) * n * phi_e_u
+                        -0.5 * theta_DG * (/* factor * */ sigma_pe_plus /* + sigma_pe_minus */) * n * ue_u
+                        +factor * penalty * ue_u * phi_e_u );
+            } // end j
+        } //  end i
+    } // end q_point
+}
+
+
+///////////////////////////////////////////////////////////////
+template <int dim>
+void DGElasticityPhaseFieldEquations<dim>::assemble_face_term_rhs(const FEFaceValuesBase<dim>& fe_values,
+        const FEFaceValuesBase<dim>& fe_values_neighbor,
+        const double face_measure,
+        Vector<double> &ui_phi_i_rhs,
+        Vector<double> &ue_phi_i_rhs,
+        Vector<double> &ui_phi_e_rhs,
+        Vector<double> &ue_phi_e_rhs) const
+{
+    const FEValuesExtractors::Vector displacements (0);
+    const FEValuesExtractors::Scalar phase_field (dim);
+
+    const unsigned int   dofs_per_cell   = fe_values.dofs_per_cell;
+    const unsigned int n_face_q_points   = fe_values.n_quadrature_points;
+
+    // We declare Vectors and Tensors for
+    // the solutions at the previous Newton iteration:
+    std::vector<Vector<double> > old_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads (n_face_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_solution_values_neighbor (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > > old_solution_grads_neighbor (n_face_q_points,
+            std::vector<Tensor<1,dim> > (dim+1));
+
+    std::vector<Vector<double> > old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    std::vector<Vector<double> > old_old_timestep_solution_values (n_face_q_points,
+            Vector<double>(dim+1));
+
+    // Old Newton iteration values
+    fe_values.get_function_values (solution, old_solution_values);
+    fe_values.get_function_grads (solution, old_solution_grads);
+
+    fe_values_neighbor.get_function_values (solution, old_solution_values_neighbor);
+    fe_values_neighbor.get_function_grads (solution, old_solution_grads_neighbor);
+
+    fe_values.get_function_values (old_timestep_solution, old_timestep_solution_values);
+    fe_values.get_function_values (old_old_timestep_solution, old_old_timestep_solution_values);
+
+    Tensor<2,dim> identity;
+    identity[0][0] = 1.0;
+    identity[0][1] = 0.0;
+    identity[1][0] = 0.0;
+    identity[1][1] = 1.0;
+
+    //!mital
+    const double penalty = penalty_u_face ;/// face_measure;
+
+    for (unsigned int q=0; q<n_face_q_points; ++q)
+    {
+        const double dx =  fe_values.JxW(q);
+        const Point<dim>& n = fe_values.normal_vector(q);
+
+        double pf_extra = 0.0;
+        const double old_timestep_pf = old_timestep_solution_values[q](dim);
+        const double old_old_timestep_pf = old_old_timestep_solution_values[q](dim);
+
+        if (lintype == LinearizationScheme::simple)
+            pf_extra = old_timestep_pf;
+        else if (lintype == LinearizationScheme::interpolation)
+            pf_extra = old_old_timestep_pf + (time - (time-old_timestep-old_old_timestep))/
+                (time-old_timestep - (time-old_timestep-old_old_timestep)) * (old_timestep_pf - old_old_timestep_pf);
+
+        if (pf_extra <= 0.0)
+            pf_extra = 0.0;
+        if (pf_extra >= 1.0)
+            pf_extra = 1.0;
+
+        //!mital: Modifying to agree with Thomas's code
+        //const double factor = ((1-constant_k) * pf_extra * pf_extra + constant_k);
+        //const double factor = pf_extra;
+
+        Tensor<1,dim> ui;
+        ui[0] = old_solution_values[q](0);
+        ui[1] = old_solution_values[q](1);
+
+        Tensor<2,dim> grad_ui;
+        grad_ui[0][0] =  old_solution_grads[q][0][0];
+        grad_ui[0][1] =  old_solution_grads[q][0][1];
+        grad_ui[1][0] =  old_solution_grads[q][1][0];
+        grad_ui[1][1] =  old_solution_grads[q][1][1];
+
+        Tensor<1,dim> ue;
+        ue[0] = old_solution_values_neighbor[q](0);
+        ue[1] = old_solution_values_neighbor[q](1);
+
+        Tensor<2,dim> grad_ue;
+        grad_ue[0][0] =  old_solution_grads_neighbor[q][0][0];
+        grad_ue[0][1] =  old_solution_grads_neighbor[q][0][1];
+        grad_ue[1][0] =  old_solution_grads_neighbor[q][1][0];
+        grad_ue[1][1] =  old_solution_grads_neighbor[q][1][1];
+
+        // Displacements (structure domain)
+        Tensor<2,dim> E_ui = 0.5 * (grad_ui + transpose(grad_ui));
+        Tensor<2,dim> E_ue = 0.5 * (grad_ue + transpose(grad_ue));
+
+        Tensor<2,dim> sigma_ui_plus, sigma_ui_minus, sigma_ue_plus, sigma_ue_minus;
+        if (decompose_stress_rhs)
+        {
+            std::cout << "DEBUG: Decomposing!" << std::endl;
+            Tensor<2,dim> zero_matrix;
+            zero_matrix = 0;
+            decompose_stress(sigma_ui_plus, sigma_ui_minus,
+                    E_ui, trace(E_ui), zero_matrix, 0.0,
+                    lame_coefficient_mu,
+                    lame_coefficient_lambda, false);
+            decompose_stress(sigma_ue_plus, sigma_ue_minus,
+                    E_ue, trace(E_ue), zero_matrix, 0.0,
+                    lame_coefficient_mu,
+                    lame_coefficient_lambda, false);
+        } else
+        {
+            sigma_ui_plus = 2.0 * lame_coefficient_mu * E_ui + lame_coefficient_lambda * trace(E_ui) * identity;
+            sigma_ui_minus = 0;
+            sigma_ue_plus = 2.0 * lame_coefficient_mu * E_ue + lame_coefficient_lambda * trace(E_ue) * identity;
+            sigma_ue_minus = 0;
+        }
+
+        for (unsigned i=0;i<dofs_per_cell;++i)
+        {
+            // Displacements
+            // i=+ , e=-
+            const Tensor<1,dim> phi_i_u      = fe_values[displacements].value(i,q);
+            const Tensor<2,dim> phi_i_grad_u = fe_values[displacements].gradient(i,q);
+            const Tensor<1,dim> phi_e_u      = fe_values_neighbor[displacements].value(i,q);
+            const Tensor<2,dim> phi_e_grad_u = fe_values_neighbor[displacements].gradient(i,q);
+
+            Tensor<2,dim> E_pi = 0.5 * (phi_i_grad_u + transpose(phi_i_grad_u));
+            Tensor<2,dim> E_pe = 0.5 * (phi_e_grad_u + transpose(phi_e_grad_u));
+
+            Tensor<2,dim> sigma_pi_plus, sigma_pi_minus, sigma_pe_plus, sigma_pe_minus;
+            if (decompose_stress_rhs)
+            {
+            std::cout << "DEBUG: Decomposing!" << std::endl;
+                Tensor<2,dim> zero_matrix;
+                zero_matrix = 0;
+                decompose_stress(sigma_pi_plus, sigma_pi_minus,
+                        E_pi, trace(E_pi), zero_matrix, 0.0,
+                        lame_coefficient_mu,
+                        lame_coefficient_lambda, false);
+                decompose_stress(sigma_pe_plus, sigma_pe_minus,
+                        E_pe, trace(E_pe), zero_matrix, 0.0,
+                        lame_coefficient_mu,
+                        lame_coefficient_lambda, false);
+            } else
+            {
+                sigma_pi_plus = 2.0 * lame_coefficient_mu * E_pi + lame_coefficient_lambda * trace(E_pi) * identity;
+                sigma_pi_minus = 0;
+                sigma_pe_plus = 2.0 * lame_coefficient_mu * E_pe + lame_coefficient_lambda * trace(E_pe) * identity;
+                sigma_pe_minus = 0;
+            }
+
+            // Displacements
+            // !mital: Thomas's code looks very different. For instance, factor = pf_extra
+            // and all terms have factor multiplied by them. Including the jump penalization
+            // of u and v. Why!?
+
+            double factor = pf_extra;
+
+            ui_phi_i_rhs(i) -= dx * timestep * (
+                    -0.5 * (/* factor * */ sigma_ui_plus /* + sigma_ui_minus */) * n * phi_i_u
+                    +0.5 * theta_DG * (/* factor * */ sigma_pi_plus /* + sigma_pi_minus */) * n * ui
+                    +factor * penalty * ui * phi_i_u );
+
+            ue_phi_i_rhs(i) -= dx * timestep * (
+                    -0.5 * (/* factor * */ sigma_ue_plus /* + sigma_ue_minus */) * n * phi_i_u
+                    -0.5 * theta_DG * (/* factor * */ sigma_pi_plus /* + sigma_pi_minus */) * n * ue
+                    -factor * penalty * ue * phi_i_u );
+
+            ui_phi_e_rhs(i) -= dx * timestep * (
+                    +0.5 * (/* factor * */ sigma_ui_plus /* + sigma_ui_minus */) * n * phi_e_u
+                    +0.5 * theta_DG * (/* factor * */ sigma_pe_plus /* + sigma_pe_minus */) * n * ui
+                    -factor * penalty * ui * phi_e_u );
+
+            ue_phi_e_rhs(i) -= dx * timestep * (
+                    +0.5 * (/* factor * */ sigma_ue_plus /* + sigma_ue_minus */) * n * phi_e_u
+                    -0.5 * theta_DG * (/* factor * */ sigma_pe_plus /* + sigma_pe_minus */) * n * ue
+                    +factor * penalty * ue * phi_e_u );
+        } // end i
+    } // end q_point
+}
+
+//----------------------------------------------------------
+// Class for initial values
+template <int dim>
+class InitialValues : public Function<dim>
+{
+    public:
+        InitialValues () : Function<dim>(dim+1) {}
+
+        virtual double value (const Point<dim>   &p,
+                const unsigned int  component = 0) const;
+
+        virtual void vector_value (const Point<dim> &p,
+                Vector<double>   &value) const;
+};
+
+template <int dim>
+double InitialValues<dim>::value (const Point<dim>  &p,
+        const unsigned int component) const
+{
+    if (component == 2)
+        return 1.0;
+    else
+        return 0.0;
+}
+
+template <int dim>
+void InitialValues<dim>::vector_value (const Point<dim> &p,
+        Vector<double>   &values) const
+{
+    for (unsigned int comp=0; comp<this->n_components; ++comp)
+        values (comp) = InitialValues<dim>::value (p, comp);
+}
+
+
+//-----------------------------------------------------------------------------
+template <int dim>
+class DGMethod
+{
+    public:
+        DGMethod (InputHandler &parser);
+        ~DGMethod ();
+
+        void run ();
+
+    private:
+        void set_runtime_parameters ();
+        void setup_system ();
+        void assemble_system_matrix ();
+        void assemble_system_rhs ();
+        void newton_iteration();
+
+        void solve ();
+        void refine_mesh ();
+        void output_results (const unsigned int cycle,
+                const BlockVector<double> output_vector) const;
+
+        void compute_surface_load();
+
+        Triangulation<dim>   triangulation;
+        const MappingQ1<dim> mapping;
+
+        const unsigned int   degree;
+
+        FESystem<dim>          fe;
+        DoFHandler<dim>      dof_handler;
+
+        ConstraintMatrix     constraints;
+
+        BlockSparsityPattern      sparsity_pattern;
+        BlockSparseMatrix<double> system_matrix;
+
+        const QGauss<dim>   quadrature;
+        const QGauss<dim-1> face_quadrature;
+
+        BlockVector<double>       solution, old_timestep_solution, old_old_timestep_solution;
+        BlockVector<double>       system_rhs, newton_update;
+        //BlockVector<double>       solution_lambda_penal_func, old_timestep_solution_lambda_penal_func;
+
+        InputHandler &parser;
+        TestCase testcase;
+        OptimizationType opttype;
+        DGElasticityPhaseFieldEquations<dim> dg;
+        // DG penalization parameter:
+        // -1 : SIPG
+        //  1 : NIPG
+        //  0 : IIPG
+        double theta_DG;
+
+        double gamma_penal;
+
+        // Global variables for timestepping scheme
+        unsigned int timestep_number;
+        unsigned int max_no_timesteps;
+        double timestep, theta_time, time;
+        double old_timestep, old_old_timestep;
+        std::string time_stepping_scheme;
+        double min_cell_diameter;
+        unsigned int max_penal_iterations;
+};
+
+template <int dim>
+DGMethod<dim>::
+DGMethod(InputHandler &parser):mapping (),
+    degree(1),
+    fe (FE_DGQ<dim>(degree), 2,
+            // !mital FE_DGQ<dim>(degree), 1
+            FE_Q<dim>(degree), 1),
+    dof_handler (triangulation),
+    quadrature (degree+2),
+    face_quadrature (degree+2),
+    parser(parser),
+    testcase(TestCase::miehe_tension),
+    opttype(OptimizationType::simple),
+    dg (parser),
+    theta_DG(0.0) // -1.0: SIPG, 1.0: NIPG, 0.0: IIPG
+{}
+
+template <int dim>
+DGMethod<dim>::~DGMethod ()
+{
+    dof_handler.clear ();
+}
+
+template <int dim>
+void DGMethod<dim>::set_runtime_parameters ()
+{
+    if (parser.get_testcase() == "miehe tension")
+        testcase = TestCase::miehe_tension;
+    else if (parser.get_testcase() == "miehe shear")
+        testcase = TestCase::miehe_shear;
+    else if (parser.get_testcase() == "symmetric bending")
+        testcase = TestCase::symmetric_bending;
+    else
+        testcase = TestCase::none;
+
+    // Set optimization type
+    if (parser.get_opttype() == "simple penalization")
+        opttype = OptimizationType::simple;
+    else if (parser.get_opttype() == "augmented lagrange")
+        opttype = OptimizationType::auglag;
+    else
+        opttype = OptimizationType::none;
+
+    // Timestepping scheme (here backward
+    // Euler since problem is quasi-static)
+    time_stepping_scheme = "BE";
+    theta_time = 1.0;
+
+    // Timestep size:
+    timestep = parser.get_timestep();
+
+    // Maximum number of timesteps:
+    max_no_timesteps = parser.get_maxtimesteps();
+
+    // A variable to count the number of time steps
+    timestep_number = 0;
+
+    // Counts total time
+    time = 0;
+
+    // Gamma Penal
+    gamma_penal = parser.get_penaltyAL();;
+
+    // Max number of Augmented Lagrange loops
+    max_penal_iterations = parser.get_maxitersAL();
+
+    if (testcase == TestCase::miehe_tension)
+    {
+        std::string grid_name;
+        grid_name  = "unit_slit.inp";
+        GridIn<dim> grid_in;
+        grid_in.attach_triangulation (triangulation);
+        std::ifstream input_file(grid_name.c_str());
+        Assert (dim==2, ExcInternalError());
+        grid_in.read_ucd (input_file);
+        triangulation.refine_global (3);
+    }
+}
+
+template <int dim>
+void DGMethod<dim>::setup_system ()
+{
+    system_matrix.clear ();
+    dof_handler.distribute_dofs (fe);
+    DoFRenumbering::Cuthill_McKee (dof_handler);
+    std::vector<unsigned int> block_component (3,0);
+    block_component[2] = 1; // phase-field
+    DoFRenumbering::component_wise (dof_handler, block_component);
+    {
+        constraints.clear ();
+        DoFTools::make_hanging_node_constraints (dof_handler,
+                constraints);
+    }
+    constraints.close ();
+
+    std::vector<unsigned int> dofs_per_block (2);
+    DoFTools::count_dofs_per_block (dof_handler, dofs_per_block, block_component);
+    const unsigned int n_u = dofs_per_block[0],
+    n_c = dofs_per_block[1];
+
+    std::cout << "Cells:\t"
+        << triangulation.n_active_cells()
+        << std::endl
+        << "DoFs:\t"
+        << dof_handler.n_dofs()
+        << " (" << n_u << '+' << n_c << ')'
+        << std::endl;
+
+    BlockCompressedSimpleSparsityPattern csp (2,2);
+
+    csp.block(0,0).reinit (n_u, n_u);
+    csp.block(0,1).reinit (n_u, n_c);
+
+    csp.block(1,0).reinit (n_c, n_u);
+    csp.block(1,1).reinit (n_c, n_c);
+
+    csp.collect_sizes();
+
+    DoFTools::make_flux_sparsity_pattern (dof_handler, csp, constraints, false);
+
+    sparsity_pattern.copy_from (csp);
+    system_matrix.reinit (sparsity_pattern);
+
+    // Actual solution at time step n
+    solution.reinit (2);
+    solution.block(0).reinit (n_u);
+    solution.block(1).reinit (n_c);
+
+    solution.collect_sizes ();
+
+    // Old timestep solution at time step n-1
+    old_timestep_solution.reinit (2);
+    old_timestep_solution.block(0).reinit (n_u);
+    old_timestep_solution.block(1).reinit (n_c);
+
+    old_timestep_solution.collect_sizes ();
+
+    //!mital
+    // Old old timestep solution at time step n-2
+    //old_old_timestep_solution.reinit (2);
+    //old_old_timestep_solution.block(0).reinit (n_u);
+    //old_old_timestep_solution.block(1).reinit (n_c);
+
+    //old_old_timestep_solution.collect_sizes ();
+
+    // Updates for Newton's method
+    newton_update.reinit (2);
+    newton_update.block(0).reinit (n_u);
+    newton_update.block(1).reinit (n_c);
+
+    newton_update.collect_sizes ();
+
+    // Residual for  Newton's method
+    system_rhs.reinit (2);
+    system_rhs.block(0).reinit (n_u);
+    system_rhs.block(1).reinit (n_c);
+
+    system_rhs.collect_sizes ();
+
+    min_cell_diameter = 1.0e+10;
+    double cell_diameter = 1.0e+9;
+    typename DoFHandler<dim>::active_cell_iterator
+        cell = dof_handler.begin_active(),
+             endc = dof_handler.end();
+
+    for (; cell!=endc; ++cell)
+    {
+        cell_diameter = cell->diameter();
+        if (cell_diameter < min_cell_diameter)
+            min_cell_diameter = cell_diameter;
+    }
+
+    std::cout << "Min cell dia: " << min_cell_diameter << std::endl;
+    dg.set_min_cell_diameter(min_cell_diameter);
+
+
+    /*solution_lambda_penal_func.reinit(2);
+    solution_lambda_penal_func.block(0).reinit(n_u);
+    solution_lambda_penal_func.block(1).reinit(n_c);
+
+    solution_lambda_penal_func.collect_sizes();
+
+    old_timestep_solution_lambda_penal_func.reinit(2);
+    old_timestep_solution_lambda_penal_func.block(0).reinit(n_u);
+    old_timestep_solution_lambda_penal_func.block(1).reinit(n_c);
+
+    old_timestep_solution_lambda_penal_func.collect_sizes();
+    */
+}
+
+
+// Jacobian of Newton's method
+template <int dim>
+void DGMethod<dim>::assemble_system_matrix ()
+{
+    system_matrix=0;
+
+    const unsigned int dofs_per_cell = dof_handler.get_fe().dofs_per_cell;
+    std::vector<unsigned int> dofs (dofs_per_cell);
+    std::vector<unsigned int> dofs_neighbor (dofs_per_cell);
+
+    const UpdateFlags update_flags = update_values
+        | update_gradients
+        | update_quadrature_points
+        | update_JxW_values;
+
+    const UpdateFlags face_update_flags = update_values
+        | update_gradients
+        | update_quadrature_points
+        | update_JxW_values
+        | update_normal_vectors;
+
+    const UpdateFlags neighbor_face_update_flags = update_values | update_gradients;
+
+    FEValues<dim> fe_values (mapping, fe, quadrature, update_flags);
+    FEFaceValues<dim> fe_values_face (mapping, fe, face_quadrature, face_update_flags);
+    FESubfaceValues<dim> fe_values_subface (mapping, fe, face_quadrature, face_update_flags);
+    FEFaceValues<dim> fe_values_face_neighbor (mapping, fe, face_quadrature, neighbor_face_update_flags);
+
+    FullMatrix<double> ui_phi_i_matrix (dofs_per_cell, dofs_per_cell);
+    FullMatrix<double> ue_phi_i_matrix (dofs_per_cell, dofs_per_cell);
+
+    FullMatrix<double> ui_phi_e_matrix (dofs_per_cell, dofs_per_cell);
+    FullMatrix<double> ue_phi_e_matrix (dofs_per_cell, dofs_per_cell);
+
+    Vector<double>  local_rhs (dofs_per_cell);
+
+    dg.get_solution_and_timestep_data (
+            solution,
+            old_timestep_solution,
+            old_old_timestep_solution,
+//            solution_lambda_penal_func,
+//            old_timestep_solution_lambda_penal_func,
+            time,
+            timestep,
+            old_timestep,
+            old_old_timestep);
+
+    typename DoFHandler<dim>::active_cell_iterator
+        cell = dof_handler.begin_active(),
+             endc = dof_handler.end();
+
+    for (;cell!=endc; ++cell)
+    {
+        ui_phi_i_matrix = 0;
+        fe_values.reinit (cell);
+
+        dg.assemble_cell_term_matrix(fe_values,
+                ui_phi_i_matrix);
+
+        cell->get_dof_indices (dofs);
+
+        for (unsigned int face_no=0; face_no<GeometryInfo<dim>::faces_per_cell; ++face_no)
+        {
+            typename DoFHandler<dim>::face_iterator face=
+                cell->face(face_no);
+
+            fe_values_face.reinit (cell, face_no);
+
+            if (face->at_boundary())
+            {
+                unsigned int boundary_color = cell->face(face_no)->boundary_indicator();
+                dg.assemble_boundary_term_matrix(fe_values_face,
+                        face->measure(),
+                        ui_phi_i_matrix,
+                        boundary_color);
+            }
+            else
+            {
+                Assert (cell->neighbor(face_no).state() == IteratorState::valid,
+                        ExcInternalError());
+                typename DoFHandler<dim>::cell_iterator neighbor=
+                    cell->neighbor(face_no);
+
+                if (face->has_children())
+                {
+                    const unsigned int neighbor2=
+                        cell->neighbor_face_no(face_no);
+
+                    for (unsigned int subface_no=0;
+                            subface_no<face->number_of_children(); ++subface_no)
+                    {
+                        typename DoFHandler<dim>::cell_iterator neighbor_child =
+                            cell->neighbor_child_on_subface (face_no, subface_no);
+                        Assert (!neighbor_child->has_children(), ExcInternalError());
+
+                        ue_phi_i_matrix = 0;
+                        ui_phi_e_matrix = 0;
+                        ue_phi_e_matrix = 0;
+
+                        fe_values_subface.reinit (cell, face_no, subface_no);
+                        fe_values_face_neighbor.reinit (neighbor_child, neighbor2);
+
+                        dg.assemble_face_term_matrix(fe_values_subface,
+                                fe_values_face_neighbor,
+                                neighbor_child->face(neighbor2)->measure(),
+                                ui_phi_i_matrix,
+                                ue_phi_i_matrix,
+                                ui_phi_e_matrix,
+                                ue_phi_e_matrix);
+
+                        neighbor_child->get_dof_indices (dofs_neighbor);
+
+                        for (unsigned int i=0; i<dofs_per_cell; ++i)
+                            for (unsigned int j=0; j<dofs_per_cell; ++j)
+                            {
+                                system_matrix.add(dofs[i], dofs_neighbor[j],
+                                        ue_phi_i_matrix(i,j));
+                                system_matrix.add(dofs_neighbor[i], dofs[j],
+                                        ui_phi_e_matrix(i,j));
+                                system_matrix.add(dofs_neighbor[i], dofs_neighbor[j],
+                                        ue_phi_e_matrix(i,j));
+                            }
+                    }
+                }
+                else
+                {
+                    if (!cell->neighbor_is_coarser(face_no) &&
+                            (neighbor->index() > cell->index() ||
+                             (neighbor->level() < cell->level() &&
+                              neighbor->index() == cell->index())))
+                    {
+                        const unsigned int neighbor2=cell->neighbor_of_neighbor(face_no);
+                        ue_phi_i_matrix = 0;
+                        ui_phi_e_matrix = 0;
+                        ue_phi_e_matrix = 0;
+
+                        fe_values_face_neighbor.reinit (neighbor, neighbor2);
+
+                        dg.assemble_face_term_matrix(fe_values_face,
+                                fe_values_face_neighbor,
+                                face->measure(),
+                                ui_phi_i_matrix,
+                                ue_phi_i_matrix,
+                                ui_phi_e_matrix,
+                                ue_phi_e_matrix);
+
+                        neighbor->get_dof_indices (dofs_neighbor);
+
+                        for (unsigned int i=0; i<dofs_per_cell; ++i)
+                            for (unsigned int j=0; j<dofs_per_cell; ++j)
+                            {
+                                system_matrix.add(dofs[i], dofs_neighbor[j],
+                                        ue_phi_i_matrix(i,j));
+                                system_matrix.add(dofs_neighbor[i], dofs[j],
+                                        ui_phi_e_matrix(i,j));
+                                system_matrix.add(dofs_neighbor[i], dofs_neighbor[j],
+                                        ue_phi_e_matrix(i,j));
+                            }
+                    }
+                }
+            }
+        }
+        constraints.distribute_local_to_global (ui_phi_i_matrix, dofs, system_matrix);
+    }
+}
+
+
+// Right hand side residual of Newton's method
+template <int dim>
+void DGMethod<dim>::assemble_system_rhs ()
+{
+    system_rhs=0;
+
+    const unsigned int dofs_per_cell = dof_handler.get_fe().dofs_per_cell;
+    std::vector<unsigned int> dofs (dofs_per_cell);
+    std::vector<unsigned int> dofs_neighbor (dofs_per_cell);
+
+    const UpdateFlags update_flags = update_values
+        | update_gradients
+        | update_quadrature_points
+        | update_JxW_values;
+
+    const UpdateFlags face_update_flags = update_values
+        | update_gradients
+        | update_quadrature_points
+        | update_JxW_values
+        | update_normal_vectors;
+
+    const UpdateFlags neighbor_face_update_flags = update_values | update_gradients;
+
+    FEValues<dim> fe_values (mapping, fe, quadrature, update_flags);
+    FEFaceValues<dim> fe_values_face (mapping, fe, face_quadrature, face_update_flags);
+    FESubfaceValues<dim> fe_values_subface (mapping, fe, face_quadrature, face_update_flags);
+    FEFaceValues<dim> fe_values_face_neighbor (mapping, fe, face_quadrature, neighbor_face_update_flags);
+
+    Vector<double> ui_phi_i_rhs (dofs_per_cell);
+    Vector<double> ue_phi_i_rhs (dofs_per_cell);
+    Vector<double> ui_phi_e_rhs (dofs_per_cell);
+    Vector<double> ue_phi_e_rhs (dofs_per_cell);
+
+    dg.get_solution_and_timestep_data (
+            solution,
+            old_timestep_solution,
+            old_old_timestep_solution,
+//            solution_lambda_penal_func,
+//            old_timestep_solution_lambda_penal_func,
+            time,
+            timestep,
+            old_timestep,
+            old_old_timestep);
+
+    typename DoFHandler<dim>::active_cell_iterator
+        cell = dof_handler.begin_active(),
+        endc = dof_handler.end();
+
+    for (;cell!=endc; ++cell)
+    {
+        ui_phi_i_rhs = 0;
+        fe_values.reinit (cell);
+
+        // Assemble element contributions
+        dg.assemble_cell_term_rhs(fe_values,
+                ui_phi_i_rhs);
+
+        cell->get_dof_indices (dofs);
+
+        for (unsigned int face_no=0; face_no<GeometryInfo<dim>::faces_per_cell; ++face_no)
+        {
+            typename DoFHandler<dim>::face_iterator face=
+                cell->face(face_no);
+
+            fe_values_face.reinit (cell, face_no);
+
+            if (face->at_boundary())
+            {
+                unsigned int boundary_color = cell->face(face_no)->boundary_indicator();
+                // Assemble boundary contributions
+                dg.assemble_boundary_term_rhs(fe_values_face,
+                        face->measure(),
+                        ui_phi_i_rhs,
+                        boundary_color);
+            }
+            else
+            {
+                Assert (cell->neighbor(face_no).state() == IteratorState::valid,
+                        ExcInternalError());
+                typename DoFHandler<dim>::cell_iterator neighbor=
+                    cell->neighbor(face_no);
+
+                // case b) and d)
+                // Assemble face contributions in the interior
+                // Here we need cell and neighbor contributions;
+                // namely, four contributions
+                if (face->has_children())
+                {
+                    const unsigned int neighbor2=
+                        cell->neighbor_face_no(face_no);
+
+                    for (unsigned int subface_no=0;
+                            subface_no<face->number_of_children(); ++subface_no)
+                    {
+                        typename DoFHandler<dim>::cell_iterator neighbor_child
+                            = cell->neighbor_child_on_subface (face_no, subface_no);
+                        Assert (!neighbor_child->has_children(), ExcInternalError());
+
+                        ue_phi_i_rhs = 0;
+                        ui_phi_e_rhs = 0;
+                        ue_phi_e_rhs = 0;
+
+                        fe_values_subface.reinit (cell, face_no, subface_no);
+                        fe_values_face_neighbor.reinit (neighbor_child, neighbor2);
+
+                        dg.assemble_face_term_rhs(fe_values_subface,
+                                fe_values_face_neighbor,
+                                neighbor_child->face(neighbor2)->measure(),
+                                ui_phi_i_rhs,
+                                ue_phi_i_rhs,
+                                ui_phi_e_rhs,
+                                ue_phi_e_rhs);
+
+                        neighbor_child->get_dof_indices (dofs_neighbor);
+
+                        for (unsigned int i=0; i<dofs_per_cell; ++i)
+                        {
+                            system_rhs(dofs[i])          += ue_phi_i_rhs(i);
+                            system_rhs(dofs_neighbor[i]) += ui_phi_e_rhs(i);
+                            system_rhs(dofs_neighbor[i]) += ue_phi_e_rhs(i);
+                        }
+                    }
+                }
+                else
+                {
+                    // Case c)
+                    if (!cell->neighbor_is_coarser(face_no) &&
+                            (neighbor->index() > cell->index() ||
+                             (neighbor->level() < cell->level() &&
+                              neighbor->index() == cell->index())))
+                    {
+                        const unsigned int neighbor2=cell->neighbor_of_neighbor(face_no);
+
+                        ue_phi_i_rhs = 0;
+                        ui_phi_e_rhs = 0;
+                        ue_phi_e_rhs = 0;
+
+                        fe_values_face.reinit (cell, face_no);
+                        fe_values_face_neighbor.reinit (neighbor, neighbor2);
+
+                        dg.assemble_face_term_rhs(fe_values_face,
+                            fe_values_face_neighbor,
+                            face->measure(),
+                            ui_phi_i_rhs,
+                            ue_phi_i_rhs,
+                            ui_phi_e_rhs,
+                            ue_phi_e_rhs);
+
+                        neighbor->get_dof_indices (dofs_neighbor);
+                        for (unsigned int i=0; i<dofs_per_cell; ++i)
+                        {
+                            system_rhs(dofs[i])          += ue_phi_i_rhs(i);
+                            system_rhs(dofs_neighbor[i]) += ui_phi_e_rhs(i);
+                            system_rhs(dofs_neighbor[i]) += ue_phi_e_rhs(i);
+                        }
+                    }
+                }
+            }
+        }
+        constraints.distribute_local_to_global (ui_phi_i_rhs, dofs, system_rhs);
+    }
+}
+
+
+// Newton's method with simple line search backtracking
+template <int dim>
+void DGMethod<dim>::newton_iteration ()
+{
+    Timer timer_newton;
+    const double lower_bound_newton_residuum = 1.0e-8;
+    const unsigned int max_no_newton_steps  = 10;
+
+    // Decision whether the system matrix should be build
+    // at each Newton step
+    const double nonlinear_rho = 0.1;
+
+    // Line search parameters
+    unsigned int line_search_step;
+    const unsigned int  max_no_line_search_steps = 10;
+    const double line_search_damping = 0.6;
+    double new_newton_residuum;
+
+    assemble_system_rhs();
+
+    double newton_residuum = system_rhs.linfty_norm();
+    double old_newton_residuum= newton_residuum;
+    unsigned int newton_step = 1;
+
+    if (newton_residuum < lower_bound_newton_residuum)
+    {
+        std::cout << '\t'
+            << std::scientific
+            << newton_residuum
+            << std::endl;
+    }
+
+    while (newton_residuum > lower_bound_newton_residuum &&
+            newton_step < max_no_newton_steps)
+    {
+        timer_newton.start();
+        old_newton_residuum = newton_residuum;
+
+        assemble_system_rhs();
+        newton_residuum = system_rhs.linfty_norm();
+
+        if (newton_residuum < lower_bound_newton_residuum)
+        {
+            std::cout << '\t'
+                << std::scientific << newton_residuum << std::endl;
+            break;
+        }
+
+        if (newton_residuum/old_newton_residuum > nonlinear_rho)
+            assemble_system_matrix ();
+
+        // Solve Ax = b
+        solve ();
+
+        line_search_step = 0;
+        for ( ;line_search_step < max_no_line_search_steps; ++line_search_step)
+        {
+            solution += newton_update;
+            assemble_system_rhs ();
+            new_newton_residuum = system_rhs.linfty_norm();
+
+            if (new_newton_residuum < newton_residuum)
+                break;
+            else
+                solution -= newton_update;
+
+            if (line_search_step == max_no_line_search_steps-1)
+                solution +=newton_update;
+
+            newton_update *= line_search_damping;
+        }
+
+        timer_newton.stop();
+
+        std::cout << std::setprecision(5) <<newton_step << '\t'
+            << std::scientific << newton_residuum << '\t'
+            << std::scientific << newton_residuum/old_newton_residuum  <<'\t' ;
+
+        if (newton_residuum/old_newton_residuum > nonlinear_rho)
+            std::cout << "r" << '\t' ;
+        else
+            std::cout << " " << '\t' ;
+
+        std::cout << line_search_step  << '\t'
+            << std::scientific << timer_newton ()
+            << std::endl;
+
+        // Updates
+        timer_newton.reset();
+        newton_step++;
+    }
+}
+
+
+template <int dim>
+void DGMethod<dim>::solve ()
+{
+    Vector<double> sol, rhs;
+    sol = newton_update;
+    rhs = system_rhs;
+
+    SparseDirectUMFPACK A_direct;
+    A_direct.factorize(system_matrix);
+    A_direct.vmult(sol,rhs);
+    newton_update = sol;
+
+    constraints.distribute (newton_update);
+}
+
+
+template <int dim>
+void DGMethod<dim>::output_results (const unsigned int cycle,
+        const BlockVector<double> output_vector) const
+{
+    std::vector<std::string> solution_names;
+    solution_names.push_back ("x_dis");
+    solution_names.push_back ("y_dis");
+    solution_names.push_back ("chi");
+
+    std::vector<DataComponentInterpretation::DataComponentInterpretation>
+        data_component_interpretation
+        (dim+1, DataComponentInterpretation::component_is_scalar);
+
+    DataOut<dim> data_out;
+    data_out.attach_dof_handler (dof_handler);
+    data_out.add_data_vector (output_vector, solution_names,
+            DataOut<dim>::type_dof_data,
+            data_component_interpretation);
+
+    data_out.build_patches (0);
+    std::string filename_basis;
+
+    //TODO: change filename basis
+    filename_basis  = "solution_crack_ex_1_dg_4_";
+
+    std::ostringstream filename;
+
+    std::cout << "------------------" << std::endl;
+    std::cout << "Write solution" << std::endl;
+    std::cout << "------------------" << std::endl;
+    std::cout << std::endl;
+    filename << filename_basis
+        << Utilities::int_to_string (cycle, 5)
+        << ".vtk";
+
+    std::ofstream output (filename.str().c_str());
+    data_out.write_vtk (output);
+}
+
+// Now, we arrive at the function that is responsible
+// to compute the line integrals for the surface load
+// evaluation.
+template <int dim>
+void DGMethod<dim>::compute_surface_load()
+{
+    const QGauss<dim-1> face_quadrature_formula (3);
+    FEFaceValues<dim> fe_face_values (fe, face_quadrature_formula,
+            update_values | update_gradients | update_normal_vectors |
+            update_JxW_values);
+
+    const unsigned int dofs_per_cell = fe.dofs_per_cell;
+    const unsigned int n_face_q_points = face_quadrature_formula.size();
+
+    std::vector<unsigned int> local_dof_indices (dofs_per_cell);
+    std::vector<Vector<double> >  old_solution_values (n_face_q_points,
+            Vector<double> (dim+1));
+
+    std::vector<std::vector<Tensor<1,dim> > >
+        old_solution_grads (n_face_q_points, std::vector<Tensor<1,dim> > (dim+1));
+
+    Tensor<1,dim> drag_lift_value;
+    Tensor<2,dim> identity;
+    identity[0][0] = 1.0;
+    identity[0][1] = 0.0;
+    identity[1][0] = 0.0;
+    identity[1][1] = 1.0;
+
+    double lame_coefficient_mu = dg.lame_coefficient_mu_global();
+    double lame_coefficient_lambda = dg.lame_coefficient_lambda_global();
+
+    typename DoFHandler<dim>::active_cell_iterator
+        cell = dof_handler.begin_active(),
+             endc = dof_handler.end();
+
+    for (; cell!=endc; ++cell)
+    {
+        for (unsigned int face=0; face<GeometryInfo<dim>::faces_per_cell; ++face)
+            if (cell->face(face)->at_boundary() &&
+                    cell->face(face)->boundary_indicator()==3)
+            {
+                fe_face_values.reinit (cell, face);
+                fe_face_values.get_function_values (solution, old_solution_values);
+                fe_face_values.get_function_grads (solution, old_solution_grads);
+
+                for (unsigned int q=0; q<n_face_q_points; ++q)
+                {
+                    Tensor<2,dim> grad_u;
+                    grad_u[0][0] =  old_solution_grads[q][0][0];
+                    grad_u[0][1] =  old_solution_grads[q][0][1];
+                    grad_u[1][0] =  old_solution_grads[q][1][0];
+                    grad_u[1][1] =  old_solution_grads[q][1][1];
+
+                    Tensor<2,dim> E = 0.5 * (grad_u + transpose(grad_u));
+                    Tensor<2,dim> sigma_s = 2.0 * lame_coefficient_mu * E +
+                        lame_coefficient_lambda * trace(E) * identity;
+
+                    drag_lift_value +=  sigma_s *
+                        fe_face_values.normal_vector(q)* fe_face_values.JxW(q);
+
+                }
+            } // end boundary 3 for structure
+    }
+    std::cout << "Fx: " << time << "  " << drag_lift_value[0] << std::endl;
+    std::cout << "Fy: " << time << "  " << drag_lift_value[1] << std::endl;
+}
+
+
+
+template<int dim>
+void DGMethod<dim>::refine_mesh()
+{
+    typename DoFHandler<dim>::active_cell_iterator
+        cell = dof_handler.begin_active(),
+             endc = dof_handler.end();
+
+    for (; cell!=endc; ++cell)
+    {
+        for (unsigned int vertex=0;vertex < GeometryInfo<dim>::vertices_per_cell;++vertex)
+        {
+            Tensor<1,dim> cell_vertex = (cell->vertex(vertex));
+            if (cell_vertex[0] <= 0.55 && cell_vertex[0] >= 0.0 &&
+                    cell_vertex[1] < 0.55 && cell_vertex[1] > 0.45)
+            {
+                cell->set_refine_flag();
+                break;
+            }
+        }
+    }
+
+    BlockVector<double> tmp_solution;
+    tmp_solution = solution;
+
+    SolutionTransfer<dim, BlockVector<double> > solution_transfer (dof_handler);
+
+    triangulation.prepare_coarsening_and_refinement();
+    solution_transfer.prepare_for_coarsening_and_refinement(tmp_solution);
+
+    triangulation.execute_coarsening_and_refinement ();
+    setup_system ();
+
+    solution_transfer.interpolate(tmp_solution, solution);
+}
+
+
+template <int dim>
+void DGMethod<dim>::run ()
+{
+    set_runtime_parameters ();
+    setup_system ();
+
+    std::cout << "\n=============================="
+        << "====================================="  << std::endl;
+    std::cout << "Parameters\n"
+        << "==========\n"
+        << std::endl;
+    {
+        ConstraintMatrix constraints;
+        constraints.close();
+
+        //!mital
+        //std::vector<bool> component_mask (dim+1, true);
+
+        //Initialize the solution vector
+        VectorTools::project (dof_handler,
+                constraints,
+                QGauss<dim>(degree+2),
+                InitialValues<dim>(),
+                solution);
+
+        output_results (0,solution);
+    }
+    // Initialize Vectors
+    old_timestep_solution = solution;
+    //solution_lambda_penal_func = 0;
+
+    // Initialize old and old_old timestep sizes
+    old_timestep = timestep;
+    old_old_timestep = timestep;
+
+    unsigned int refine_mesh_1st = 1;
+    unsigned int refine_mesh_2nd = 2;
+    unsigned int refine_mesh_3rd = 300000;
+    unsigned int refine_mesh_4th = 400000;
+    unsigned int refine_mesh_5th = 500000;
+
+    const unsigned int output_skip = 1;
+    unsigned int refinement_cycle = 0;
+
+    // Time loop
+    do
+    {
+        if (timestep_number > 50)
+            timestep = 1.0e-5;
+
+        std::cout << "Timestep " << timestep_number
+            << " (" << time_stepping_scheme
+            << ")" <<    ": " << time
+            << " (" << timestep << ")"
+            << "\n=============================="
+            << "====================================="
+            << std::endl;
+
+        std::cout << std::endl;
+
+        // Compute next time step
+        old_old_timestep = old_timestep;
+        old_timestep = timestep;
+
+        old_old_timestep_solution = old_timestep_solution;
+        old_timestep_solution = solution;
+
+        //BlockVector<double> solution_lambda_penal_func_difference;
+        //unsigned int penal_iterations = 0;
+        //double L2_error = 0.0;
+        /*
+        if (opttype == OptimizationType::auglag)
+        {
+            do
+            {
+                // Step 1: Solve the system
+                newton_iteration ();
+
+                // Step 2: Update lambda_penal_func
+                old_timestep_solution_lambda_penal_func = solution_lambda_penal_func;
+                for (unsigned int j=0; j<solution_lambda_penal_func.block(1).size(); ++j)
+                {
+                    double lambda_penal_update = std::max(0.0, (solution_lambda_penal_func.block(1)(j)
+                        + gamma_penal * (solution.block(1)(j) - old_timestep_solution.block(1)(j))));
+
+                    solution_lambda_penal_func.block(1)(j) = lambda_penal_update;
+                }
+
+                solution_lambda_penal_func_difference = solution_lambda_penal_func;
+                solution_lambda_penal_func_difference -= old_timestep_solution_lambda_penal_func;
+
+                Vector<float> difference_per_cell (triangulation.n_active_cells());
+                const ComponentSelectFunction<dim> pf_solution_mask (dim, dim+1);
+                VectorTools::integrate_difference (dof_handler,
+                        solution_lambda_penal_func_difference,
+                        ZeroFunction<dim>(3),
+                        difference_per_cell,
+                        QGauss<dim>(3),
+                        VectorTools::L2_norm,
+                        &pf_solution_mask);
+                L2_error = difference_per_cell.l2_norm();
+
+                std::cout << std::endl;
+                std::cout << "Norm Lambda Difference: " << std::scientific
+                    << L2_error << std::endl;
+                std::cout << std::endl;
+
+                penal_iterations++;
+            }
+            while ((L2_error > 1.0e-4) && (penal_iterations < max_penal_iterations));
+
+            std::cout << std::endl;
+            std::cout << "Number of Augmented Lagrange Loops: " << std::scientific
+                << penal_iterations << std::endl;
+        } else if (opttype == OptimizationType::simple)
+        {
+            old_timestep_solution_lambda_penal_func = 0;
+            solution_lambda_penal_func = 0;
+            newton_iteration ();
+        } else
+        {
+            abort();
+        }
+        */
+
+        newton_iteration();
+        time += timestep;
+
+        // Compute functional values
+        std::cout << std::endl;
+        compute_surface_load();
+
+        // Write solutions
+        if ((timestep_number % output_skip == 0))
+            output_results (timestep_number+1,solution);
+
+        // A priori local mesh refinement
+        // in the region where the crack
+        // is expected to grow
+        if (timestep_number  == refine_mesh_1st ||
+                timestep_number  == refine_mesh_2nd ||
+                timestep_number  == refine_mesh_3rd ||
+                timestep_number  == refine_mesh_4th ||
+                timestep_number  == refine_mesh_5th)
+        {
+            std::cout << "Refinement cycle "
+                << refinement_cycle
+                << "\n================== "
+                << std::endl;
+
+            refine_mesh ();
+            ++refinement_cycle;
+        }
+
+        ++timestep_number;
+    }
+    while (timestep_number <= max_no_timesteps);
+}
+
+
+int main (int argc, char **argv)
+{
+
+    InputHandler parser(argc, argv);
+
+    try
+    {
+        using namespace dealii;
+        const unsigned int dim = 2;
+        {
+            DGMethod<dim> dgmethod_iso(parser);
+            dgmethod_iso.run ();
+        }
+    }
+    catch (std::exception &exc)
+    {
+        std::cerr << std::endl << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+
+        std::cerr << "Exception on processing: " << std::endl
+            << exc.what() << std::endl
+            << "Aborting!" << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+
+        return 1;
+    }
+    catch (...)
+    {
+        std::cerr << std::endl << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+
+        std::cerr << "Unknown exception!" << std::endl
+            << "Aborting!" << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+
+        return 1;
+    };
+    return 0;
+}
+
+// TODO
+// - penalization parameter depends on time-dependent phase-field
+// - DONE simple penalization -> might be improved by augmented Lagrangian
+// - u as DG and phi as CG (maybe also phi in DG)
+// - SIPG, NIPG, IIPG require careful testing and comparions
+// - DONE make penalization parameter `h' or 'face-length' dependent
+// - a hybrid DG/CG formulation in which DG is only solved `around' the crack
+// - shear test: decomposition into tension and compression

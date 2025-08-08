@@ -1,0 +1,287 @@
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+$ B. Momken, 3/17/99
+TITLE(2)="SINGLE PHASE TEST SMALL"
+
+DESCRIPTION()=
+
+"BLOCK   LENGTH (FT)   WIDTH (FT)   HEIGHT (FT)    SIZE     CORNER"
+"  1        80            80          4           2x4x4      0,0,0"
+
+"DATE : 3/17/99"
+
+$New:
+BLOCKMODEL(1) = "POROELASTIC"
+FLOW_MODEL = "HYDROLOGY_IMPLICIT_MFMFE"
+
+$ This was TIMEEND initially ..
+TIMEEND = 60.0
+
+$NSATSTEP = 1
+
+$ change if you want to change from single phase to two phase:
+MAXNEWT = 50    $ MAX PRES NEWT STEP (DEFAULT 20)
+
+$ VIS_TABOUTTYPE (specific to v.2)
+PROCOUT
+JSTEP(,)=1
+KSTEP(,)=1
+
+
+$ Convergence Tolerance for iterative coupling
+ CVTOL = 1.0E-4
+
+$$$ FAULT BLOCK AND MESH DATA
+
+BLOCKNAME(1) = "BLOCK1"
+$DOWN(1 TO 3,1) =0. 0. 0.
+
+$corner point geometry
+Include mesh.dat
+
+$ Fracture geometry data
+$  FRAC_FILE = "frac.dat"
+
+$gus Added
+WATVIS = 1.0
+OILVIS = 2.0
+
+
+OILDEN = 56.
+WATDEN = 62.34
+
+$Incompressible
+
+$$ just commented - August, 14th ..
+OILCOMP = 1.E-4
+WATCOMP = 1.E-6
+$OILCOMP = 1.E-4
+$WATCOMP = 1.E-4
+$OILCOMP = 0.
+$WATCOMP = 0.
+
+$ POROSITY
+
+POROSITY1() = .2
+
+$ Rock Compressibility
+
+CR1() = 1.E-6
+$CR1() = 0.0
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+$ Newton parameters
+$Old:
+$CVTOL = 1.0E-5
+
+$New:
+ CVTOL = 1.0E-4
+$New:
+
+$MAXNEWT = 20
+MAXNEWT = 100
+$ I/O OPTIONS
+
+OUTLEVEL = 2
+PROCOUT
+BUGKEY(7) 
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+$ FAULT BLOCK AND MESH DATA
+
+BLOCKNAME(1) = "BLOCK1"
+DOWN(1 TO 3,1) = 1 0 0  
+$DOWN(1 TO 3,1) = 0 0 0
+Include mesh.dat
+$Include keyout.dat
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ IPARS data 
+$ INITIAL CONDITIONS
+
+$POINIT = 400.0  SWINIT = 0.9
+POINIT = 400.0  SWINIT = 0.2
+
+$ POROSITY $$$$$
+$Include poro.dat
+
+$ PERMEABILITIES $$$$$$$$$$
+
+$PERM_FULL
+XYPERM1()=.0  YZPERM1() = .0 XZPERM1() = .0
+XPERM1() = 50.  YPERM1() = 400. ZPERM1() = 150.
+
+$Include perm.dat
+ 
+$Include permzero.dat  $ Instead of keyout
+
+$$$ Added by Tameem:
+PCOW(1) Block
+ Interpolation Linear
+ Extrapolation Constant
+ Data
+ 0. 0.,
+ 1. 0.
+EndBlock
+
+$$Include relperm.dat
+$
+$KOSW(1) Block
+$ Interpolation Linear
+$ Extrapolation Constant
+$ Data
+$ 0. 1.,
+$ 1. 0.
+$EndBlock
+$
+$KWSW(1) Block
+$ Interpolation Linear
+$ Extrapolation Constant
+$ Data
+$ 0. 0.,
+$ 1. 1.
+$EndBlock
+
+
+KOSW(1) Block        $ OIL RELATIVE PERMEABILITY VS Sw - ROCK TYPE 1
+  Interpolation Spline2
+  Extrapolation Constant
+  Constraint  0 At .8
+  Derivative  0 At .8
+  Constraint  1 At  0
+  Nodes  .2  .58
+  Data  0.  1. , .1  .67 , .2  .46 , .4  .2 , .6  .055 , .7  .015 , .8  0
+EndBlock
+
+KWSW(1) Block        $ WATER RELATIVE PERMEABILITY VS Sw - ROCK TYPE 1
+  Interpolation Spline2
+  Extrapolation Constant
+  Constraint  0 At .15
+  Derivative  0 At .15
+  Constraint  1 At   1
+  Nodes  .55  .7  .75
+  Data  .15  0 , .3  .035 , .4  .085 , .6  .28 , .8  .776 , 1  1
+EndBlock
+
+
+
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ WELLS
+
+$$$$ End Added by Tameem
+
+Include wells.dat
+
+$ Elastic Properties
+ 
+$GRAVITY_FLAG = 1
+$ 
+$MODULUS1() = 4559.753285E6[Pa] $1.45E6  $ Young's modulus
+$POISSON1() = 0.25    $ poisson's ratio
+$BIOTA1() = 1.0       $ flow mechanics coupling term
+$BIOTM1() = 1.E-20    $ PV change proportional to pressure change
+$ROCKD1() = 2.65      $ rock density
+$ 
+$EBCXXN1() = 2
+$XXDIN1() = 0.0
+$
+$EBCYY1() = 2
+$YYDI1() = 0.0
+$
+$EBCYYN1() = 2
+$YYDIN1() = 0.0
+$
+$EBCZZ1() = 2
+$ZZDI1() = 0.0
+$
+$EBCZZN1() = 2
+$ZZDIN1() = 0.0
+$
+$$$EBCXX1() = 1
+$$XXST1() = 0.0   $ put overburden pressure here
+$PRESX1() = 30.E6[Pa] $400.0
+
+
+$$$ Added by Tameem:
+
+$ Elastic Properties
+ 
+GRAVITY_FLAG = 1
+$GRAVITY_FLAG = 0
+ 
+MODULUS1() = 5.E5  $ Young's modulus (E)
+POISSON1() = 0.4 $ poisson's ratio
+BIOTA1() = 1.0   $ flow mechanics coupling term
+BIOTM1() = 1.E-8 $ PV change proportional to pressure change
+ROCKD1() = 2.65  $ rock density  (in Kg\Liter)
+
+EBCXX1() = 1
+XXST1() = 10000.0
+$XXST1() = 100.0
+$$XXST1() = 0.0
+
+$EBCXX1() = 2
+$XXDI1() = 0.0
+
+EBCXXN1() = 2
+XXDIN1() = 0.0
+
+$EBCYY1() = 2
+$YYDI1() = 0.0
+
+EBCYY1() = 1
+YYSTN1() = 2000.0
+$YYST1() = 100.0
+
+EBCYYN1() = 2
+YYDIN1() = 0.0
+
+EBCZZ1() = 2
+ZZDI1() = 0.0
+
+$$this was traction
+EBCZZN1() = 1
+ZZSTN1() = 1000.0
+$ZZSTN1() = 100.0
+
+$EBCZZN1() = 2
+$ZZDIN1() = 0.0
+
+EndInitial
+
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+$ TRANSIENT DATA INPUT BLOCKS
+
+BeginTime    0.
+
+
+DELTIM = 0.05 
+DTIMMUL = 1.0  DTIMMIN = 0.05  DTIMMAX = 0.05  TIMOUT = 10.  DTIMOUT = 40.
+EndTime
+
+BeginTime    2.6
+DELTIM = 0.1  DTIMMUL = 1.0  DTIMMIN = 0.1  DTIMMAX = 0.1
+
+TIMRES = 99999.
+
+$ commented by Tameem
+VISOUT = 5.0
+DVISOUT = 5.0
+
+VIS_SCL = 6               $ Set the number of vis. scalar variables
+$VIS_NVEC = 0
+$VIS_SCL_NAMES(1) = "PRES"    $ Specify the name of vis. scalar variables
+VIS_SCL_NAMES(1) = "PWAT"
+VIS_SCL_NAMES(2) = "COIL"
+VIS_SCL_NAMES(3) = "SWAT"
+VIS_SCL_NAMES(4) = "DISPX"
+VIS_SCL_NAMES(5) = "DISPY"
+VIS_SCL_NAMES(6) = "DISPZ"
+VIS_NVEC = 2
+VIS_VEC_NAMES(1) = "VEL_OIL"
+VIS_VEC_NAMES(2) = "VEL_WAT"
+VISFLAG = 8
+VIS_FNAME = "temp"
+
+EndTime
+

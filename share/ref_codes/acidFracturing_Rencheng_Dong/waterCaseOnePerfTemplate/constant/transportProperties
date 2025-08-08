@@ -1,0 +1,26 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  2.2.0                                 |
+|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      transportProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+//  Units: l0 = unit of the point field and t0 = l0*A/Q  //
+
+Kinv         Kinv [ 0 -2 0 0 0 0 0 ] 0.0;        // l0^-2   == 1/K
+nu             nu [ 0 2 -1 0 0 0 0 ] 1.0;        // l0^2/t0 == 1/Re
+D               D [ 0 2 -1 0 0 0 0 ] 0.0025;       // l0^2/t0 == 1/Pe
+lR             lR [ 0 1  0 0 0 0 0 ] 1.667e-3;        // D/k*l0  == 1/Da_II
+tScaling 7.61e-2;
+
+// ************************************************************************* //

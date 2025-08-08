@@ -1,0 +1,9 @@
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/runclean.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/run.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/info.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/step-30.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/debug.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/distclean.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/help.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/release.dir
+/home/thomas/Documents/Projects/Step_crack_dg_with_Prashant/CMakeFiles/strip_comments.dir
